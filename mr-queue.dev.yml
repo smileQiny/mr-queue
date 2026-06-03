@@ -1,0 +1,31 @@
+local:
+  path: "."
+
+queue:
+  remote: "private"
+  branch: "queue"
+  base_ref: "community/master"
+
+private:
+  remote: "private"
+  branch_prefix: "mr-queue"
+  head_namespace: "submitter"
+
+community:
+  remote: "community"
+  owner: "community"
+  repo: "project"
+  branch: "master"
+
+workflow:
+  merge_method: "squash"
+  review_comment: "已完成预审，确认合并。"
+  stop_on_failure: true
+
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+  reviewer:
+    token_env: "GITCODE_REVIEWER_TOKEN"
+  maintainer:
+    token_env: "GITCODE_MAINTAINER_TOKEN"

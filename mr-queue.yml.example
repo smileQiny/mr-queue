@@ -1,0 +1,35 @@
+local:
+  path: "."
+
+queue:
+  # Branch A: all prepared commits live here.
+  remote: "private"
+  branch: "queue"
+  # Usually the latest community target branch.
+  base_ref: "community/master"
+
+private:
+  # MR branches are pushed here as one branch per commit.
+  remote: "private"
+  branch_prefix: "mr-queue"
+  head_namespace: "your_private_namespace"
+
+community:
+  # MR target.
+  remote: "community"
+  owner: "community"
+  repo: "project"
+  branch: "master"
+
+workflow:
+  merge_method: "squash"
+  review_comment: "已完成预审，确认合并。"
+  stop_on_failure: true
+
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+  reviewer:
+    token_env: "GITCODE_REVIEWER_TOKEN"
+  maintainer:
+    token_env: "GITCODE_MAINTAINER_TOKEN"
