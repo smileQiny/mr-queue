@@ -163,6 +163,11 @@ func (s *Server) runLoop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	options.OnProgress = func(progress runner.LoopProgress) {
+		s.mu.Lock()
+		s.lastMsg = "auto run: " + progress.Message
+		s.mu.Unlock()
+	}
 
 	go func() {
 		result, err := s.runtime.Runner.RunLoopWithOptions(ctx, options)

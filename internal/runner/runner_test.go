@@ -928,6 +928,92 @@ func TestRunLoopUsesWaitCheckDelayUntilMergedThenNextPRDelay(t *testing.T) {
 	}
 }
 
+func TestRunLoopReportsNextPRDelayProgress(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitOps := &fakeGitOps{
+		commits: []Commit{
+			{SHA: "first123456789", Subject: "First"},
+			{SHA: "second12345678", Subject: "Second"},
+		},
+	}
+	submitter := &fakeClient{nextNumber: 11}
+	reviewer := &fakeClient{
+		comments: []gitcode.Comment{{Body: "CLA Signature Pass"}},
+		pulls: []gitcode.PullRequest{
+			{Number: 11, State: "merged", Merged: true, MergeCommitSHA: "first-merged"},
+		},
+	}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:         "main..HEAD",
+			MergeMethod:         "external",
+			ReviewComment:       "/lgtm\n/approve",
+			RequiredCommentText: "CLA Signature Pass",
+			Approve:             boolPtr(false),
+		},
+	}, store, gitOps, submitter, reviewer, &fakeClient{})
+
+	var progress []LoopProgress
+	progressSeen := false
+	sleepCount := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = r.RunLoopWithOptions(ctx, LoopOptions{
+		WaitCheckDelayMin: time.Millisecond,
+		WaitCheckDelayMax: time.Millisecond,
+		NextPRDelayMin:    2 * time.Minute,
+		NextPRDelayMax:    2 * time.Minute,
+		MaxMergedCommits:  3,
+		OnProgress: func(item LoopProgress) {
+			progress = append(progress, item)
+			progressSeen = true
+			cancel()
+		},
+		Sleep: func(ctx context.Context, delay time.Duration) error {
+			sleepCount++
+			if progressSeen {
+				return context.Canceled
+			}
+			if sleepCount > 5 {
+				return context.Canceled
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunLoopWithOptions returned %v, want context canceled", err)
+	}
+	if len(progress) != 1 {
+		t.Fatalf("progress = %#v", progress)
+	}
+	if progress[0].Delay != 2*time.Minute {
+		t.Fatalf("delay = %s", progress[0].Delay)
+	}
+	if progress[0].MergedCount != 1 || progress[0].TargetMerged != 3 {
+		t.Fatalf("progress counts = %d/%d", progress[0].MergedCount, progress[0].TargetMerged)
+	}
+	if progress[0].Message != "本轮计划合入 3 个 PR，当前已合入 1 个；下个 PR 将在 2m0s 后启动" {
+		t.Fatalf("message = %q", progress[0].Message)
+	}
+}
+
 func TestRefreshWaitingDoesNotCreateNewPulls(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

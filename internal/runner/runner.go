@@ -52,11 +52,19 @@ type LoopOptions struct {
 	WorkWindowEnd     string
 	Now               func() time.Time
 	Sleep             func(context.Context, time.Duration) error
+	OnProgress        func(LoopProgress)
 }
 
 type LoopResult struct {
 	StopReason  string
 	MergedCount int
+}
+
+type LoopProgress struct {
+	Message      string
+	Delay        time.Duration
+	MergedCount  int
+	TargetMerged int
 }
 
 type Runner struct {
@@ -217,7 +225,8 @@ func (r *Runner) RunLoopWithOptions(ctx context.Context, options LoopOptions) (L
 		}
 		after := r.store.Snapshot()
 		markNewMergeLimitEligibleTasks(before, after, eligibleForLimit)
-		mergedCount += newlyMergedEligibleCount(before, after, eligibleForLimit)
+		mergedThisIteration := newlyMergedEligibleCount(before, after, eligibleForLimit)
+		mergedCount += mergedThisIteration
 		if options.MaxMergedCommits > 0 && mergedCount >= options.MaxMergedCommits {
 			return LoopResult{
 				StopReason:  fmt.Sprintf("reached max merged commits: %d/%d", mergedCount, options.MaxMergedCommits),
@@ -228,10 +237,27 @@ func (r *Runner) RunLoopWithOptions(ctx context.Context, options LoopOptions) (L
 			return LoopResult{StopReason: "no pending or waiting tasks progressed", MergedCount: mergedCount}, nil
 		}
 		delay := nextLoopDelay(before, after, waitMinDelay, waitMaxDelay, nextMinDelay, nextMaxDelay)
+		if options.OnProgress != nil && mergedThisIteration > 0 {
+			progress := LoopProgress{
+				Delay:        delay,
+				MergedCount:  mergedCount,
+				TargetMerged: options.MaxMergedCommits,
+			}
+			progress.Message = loopProgressMessage(progress)
+			options.OnProgress(progress)
+		}
 		if err := sleep(ctx, delay); err != nil {
 			return LoopResult{StopReason: "stopped by user", MergedCount: mergedCount}, err
 		}
 	}
+}
+
+func loopProgressMessage(progress LoopProgress) string {
+	target := "不限"
+	if progress.TargetMerged > 0 {
+		target = fmt.Sprintf("%d", progress.TargetMerged)
+	}
+	return fmt.Sprintf("本轮计划合入 %s 个 PR，当前已合入 %d 个；下个 PR 将在 %s 后启动", target, progress.MergedCount, progress.Delay)
 }
 
 func normalizeDelayRange(minDelay time.Duration, maxDelay time.Duration, defaultMin time.Duration, defaultMax time.Duration) (time.Duration, time.Duration) {
@@ -284,7 +310,7 @@ func markNewMergeLimitEligibleTasks(before state.Snapshot, after state.Snapshot,
 		if _, ok := before.Tasks[sha]; ok {
 			continue
 		}
-		if afterTask.Status == "" || afterTask.Status == state.StatusPending {
+		if afterTask.Status != state.StatusSkipped && afterTask.Status != state.StatusFailed {
 			eligible[sha] = true
 		}
 	}
