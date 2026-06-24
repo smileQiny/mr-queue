@@ -1,4 +1,5 @@
 .env
+.cache/
 *.local.yml
 .mr-queue/
 /mr-queue

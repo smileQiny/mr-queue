@@ -9,6 +9,7 @@ queue:
 private:
   remote: "private"
   branch_prefix: "mr-queue"
+  branch_template: "{prefix}-{sha12}"
   head_namespace: "submitter"
 
 community:

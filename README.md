@@ -41,6 +41,22 @@ Open:
 http://127.0.0.1:8787/
 ```
 
+Preload the queue without pushing branches or creating MRs. Syncing replaces the
+visible queue with the current configured `commit_range`, so old range entries do
+not remain mixed into the panel:
+
+```bash
+go run ./cmd/mr-queue sync-queue --config mr-queue.yml
+```
+
+When local refs are already up to date and the environment cannot write to the
+target repository's `.git/FETCH_HEAD`, add `--skip-fetch` for preview-only local
+debugging:
+
+```bash
+go run ./cmd/mr-queue sync-queue --config mr-queue.yml --skip-fetch
+```
+
 Run one commit without the web panel:
 
 ```bash
@@ -53,8 +69,82 @@ Print safe config without exposing token values:
 go run ./cmd/mr-queue dry-run --config mr-queue.yml
 ```
 
+## MR Branch Names
+
+MR branch names are configurable under `private`. The default template keeps the
+old behavior:
+
+```yaml
+private:
+  branch_prefix: "mr-queue"
+  branch_template: "{prefix}-{sha12}"
+```
+
+For more readable per-commit branches, include the commit title:
+
+```yaml
+private:
+  branch_prefix: "feat"
+  branch_template: "{prefix}-{title_or_sha12}"
+```
+
+Supported placeholders are `{prefix}`, `{title}`, `{title_or_sha12}`, `{sha12}`,
+and `{sha}`. The title is converted to a safe branch slug and capped in length.
+`{title}` falls back to `commit` if the title cannot produce a safe slug.
+`{title_or_sha12}` falls back to the 12-character commit SHA instead.
+
+## External Bot Merge Mode
+
+For repositories where a bot merges after reviewer commands, set
+`merge_method: "external"`. In this mode the tool waits for the configured CLA
+comment, posts the reviewer command comment, and then polls the MR until the
+platform reports it merged. It does not call the maintainer merge API.
+
+```yaml
+workflow:
+  merge_method: "external"
+  required_comment_text: "CLA Signature Pass"
+  review_comment: |
+    /lgtm
+    /approve
+  approve: false
+  loop_delay_min: "1m"
+  loop_delay_max: "5m"
+```
+
+`loop_delay_min` and `loop_delay_max` control the random delay between automatic
+loop iterations. The web panel lets you override the delay, working time window,
+and maximum merged commits for each automatic run. The merged limit counts only
+commits that reach `merged` during that run.
+
 ## Build
 
 ```bash
 go build -o dist/mr-queue ./cmd/mr-queue
 ```
+
+## Same-Repository Test Loop
+
+For a closed-loop test in your own fork, point `community` to the same repository
+and set `queue.base_ref` to the target test branch, for example:
+
+```yaml
+queue:
+  remote: "private"
+  branch: "new-features"
+  base_ref: "private/master-test"
+
+community:
+  remote: "private"
+  owner: "smileQiny"
+  repo: "syskits"
+  branch: "master-test"
+```
+
+Click `同步队列` in the web panel first. That only loads commit metadata into the
+state file. `运行下一条` and `自动运行` are the actions that push per-commit
+branches, create MRs, review, and merge.
+
+If a commit's patch already exists on the target base branch, Git reports an
+empty cherry-pick. The task is marked `skipped` and the loop continues with the
+next commit.

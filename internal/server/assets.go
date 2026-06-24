@@ -66,6 +66,34 @@ const indexHTML = `<!doctype html>
       justify-content: flex-end;
     }
 
+    .loop-options {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(76px, 1fr));
+      gap: 8px;
+      width: 100%;
+      max-width: 540px;
+    }
+
+    .loop-options label {
+      display: grid;
+      gap: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    input {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      border-radius: 6px;
+      min-height: 32px;
+      padding: 0 8px;
+      font: inherit;
+      font-size: 13px;
+      min-width: 0;
+    }
+
     button {
       appearance: none;
       border: 1px solid var(--line);
@@ -176,6 +204,7 @@ const indexHTML = `<!doctype html>
     }
 
     .status.merged { color: var(--good); background: #ecfdf3; border-color: #abefc6; }
+    .status.skipped { color: #175cd3; background: #eff8ff; border-color: #b2ddff; }
     .status.failed { color: var(--bad); background: #fef3f2; border-color: #fecdca; }
     .status.running, .status.mr_open, .status.reviewed, .status.pushed { color: var(--warn); background: #fffaeb; border-color: #fedf89; }
 
@@ -223,6 +252,7 @@ const indexHTML = `<!doctype html>
     @media (max-width: 860px) {
       header { align-items: flex-start; flex-direction: column; padding: 16px 18px; }
       .actions { justify-content: flex-start; }
+      .loop-options { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: none; }
       main { grid-template-columns: 1fr; padding: 16px; }
       .task { grid-template-columns: 1fr; }
       .status { justify-self: start; }
@@ -236,8 +266,16 @@ const indexHTML = `<!doctype html>
       <div class="sub" id="subtitle">MR 队列编排器</div>
     </div>
     <div class="actions">
+      <div class="loop-options">
+        <label>最小间隔<input id="loopDelayMin" value="1m"></label>
+        <label>最大间隔<input id="loopDelayMax" value="5m"></label>
+        <label>开始时间<input id="workStart" type="time" value="08:00"></label>
+        <label>结束时间<input id="workEnd" type="time" value="23:30"></label>
+        <label>合入上限<input id="maxMerged" type="number" min="0" step="1" value="3"></label>
+      </div>
+      <button id="syncBtn" onclick="post('/api/sync-queue')">同步队列</button>
       <button class="primary" id="runBtn" onclick="post('/api/run-once')">运行下一条</button>
-      <button id="loopBtn" onclick="post('/api/run-loop')">自动运行</button>
+      <button id="loopBtn" onclick="runLoop()">自动运行</button>
       <button id="stopBtn" onclick="post('/api/stop')">停止</button>
       <button id="pauseBtn" onclick="post('/api/pause')">暂停</button>
       <button id="resumeBtn" onclick="post('/api/resume')">继续</button>
@@ -273,39 +311,66 @@ const indexHTML = `<!doctype html>
       await refresh();
     }
 
+    async function runLoop() {
+      const params = new URLSearchParams({
+        loop_delay_min: document.getElementById('loopDelayMin').value,
+        loop_delay_max: document.getElementById('loopDelayMax').value,
+        work_window_start: document.getElementById('workStart').value,
+        work_window_end: document.getElementById('workEnd').value,
+        max_merged_commits: document.getElementById('maxMerged').value
+      });
+      await fetch('/api/run-loop?' + params.toString(), { method: 'POST' });
+      await refresh();
+    }
+
     async function refresh() {
       const res = await fetch('/api/status');
       const data = await res.json();
-      const tasks = Object.values(data.state.tasks || {}).sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      const tasks = Object.values(data.state.tasks || {}).sort(compareTasks);
       document.getElementById('count').textContent = tasks.length + ' 条';
       document.getElementById('running').textContent = data.running ? 'running' : 'idle';
+      document.getElementById('syncBtn').disabled = data.running || data.state.paused;
       document.getElementById('runBtn').disabled = data.running || data.state.paused;
       document.getElementById('loopBtn').disabled = data.running || data.state.paused;
       document.getElementById('stopBtn').disabled = !data.running;
+      for (const id of ['loopDelayMin', 'loopDelayMax', 'workStart', 'workEnd', 'maxMerged']) {
+        document.getElementById(id).disabled = data.running;
+      }
       document.getElementById('pauseBtn').disabled = data.state.paused;
       document.getElementById('resumeBtn').disabled = !data.state.paused;
       document.getElementById('subtitle').textContent = data.state.paused ? '已暂停' : (data.running ? ('正在运行：' + (data.mode || 'once')) : 'MR 队列编排器');
+      applyLoopDefaults(data.config || {});
       renderQueue(tasks);
       renderConfig(data.config || {});
       renderLogs(tasks, data.lastErr);
     }
 
+    function applyLoopDefaults(config) {
+      if (window.loopDefaultsApplied) return;
+      const workflow = config.workflow || {};
+      document.getElementById('loopDelayMin').value = workflow.loop_delay_min || '1m';
+      document.getElementById('loopDelayMax').value = workflow.loop_delay_max || workflow.loop_delay_min || '5m';
+      window.loopDefaultsApplied = true;
+    }
+
     function renderQueue(tasks) {
       const el = document.getElementById('queue');
       if (!tasks.length) {
-        el.innerHTML = '<div class="empty">还没有任务。点击“运行下一条”后会扫描配置的 commit_range。</div>';
+        el.innerHTML = '<div class="empty">还没有任务。点击“同步队列”只加载 commit 列表；点击“运行下一条”会执行第一个待处理 MR。</div>';
         return;
       }
       el.innerHTML = tasks.map(task => {
         const retryButton = task.status === 'failed'
           ? '<button onclick="retry(' + JSON.stringify(task.sha).replaceAll('"', '&quot;') + ')">重试</button>'
           : '';
-        const mr = task.mr_url ? '<a href="' + escapeHTML(task.mr_url) + '" target="_blank">MR #' + task.mr_number + '</a>' : 'MR 未创建';
+        const mr = task.mr_url
+          ? '<a href="' + escapeHTML(task.mr_url) + '" target="_blank">MR #' + task.mr_number + '</a>'
+          : (task.mr_number ? 'MR #' + escapeHTML(task.mr_number) : 'MR 未创建');
         const shaMap = '队列：' + escapeHTML(shortSha(task.sha)) +
           ' -> MR：' + escapeHTML(shortSha(task.mr_commit_sha) || '-') +
           ' -> 社区：' + escapeHTML(shortSha(task.community_commit_sha) || '-');
         return '<div class="task">' +
-          '<div class="sha">' + escapeHTML(shortSha(task.sha)) + '</div>' +
+          '<div class="sha">#' + escapeHTML(displayIndex(task)) + '<br>' + escapeHTML(shortSha(task.sha)) + '</div>' +
           '<div><div class="subject">' + escapeHTML(task.subject || '(no subject)') + '</div>' +
           '<div class="meta">映射：' + shaMap + '<br>分支：' + escapeHTML(task.branch || '-') + '<br>' + mr + '<br>错误：' + escapeHTML(task.error || '-') + '</div>' +
           '</div>' +
@@ -317,12 +382,18 @@ const indexHTML = `<!doctype html>
     function renderConfig(config) {
       const rows = [
         ['本地目录', (config.local && config.local.path) || (config.source && config.source.local_path)],
+        ['commit_range', config.workflow && config.workflow.commit_range],
+        ['起止 commit', commitBounds(config)],
+        ['映射关系', mappingText(config)],
         ['队列分支', config.queue ? (config.queue.remote + '/' + config.queue.branch) : ''],
         ['队列基线', config.queue && config.queue.base_ref],
-        ['MR 分支', config.private ? (config.private.remote + '/' + config.private.branch_prefix + '-<sha>') : ''],
+        ['MR 分支', config.private ? (config.private.remote + '/' + branchTemplateText(config.private)) : ''],
         ['目标仓库', config.community ? (config.community.owner + '/' + config.community.repo) : ''],
         ['目标分支', config.community && config.community.branch],
         ['合并方式', config.workflow && config.workflow.merge_method],
+        ['等待评论', config.workflow && config.workflow.required_comment_text],
+        ['自动间隔', loopDelayText(config.workflow)],
+        ['本轮限制', '页面启动时设置'],
         ['提交账号', config.auth && config.auth.submitter && config.auth.submitter.token_env],
         ['审核账号', config.auth && config.auth.reviewer && config.auth.reviewer.token_env],
         ['合并账号', config.auth && config.auth.maintainer && config.auth.maintainer.token_env]
@@ -335,7 +406,10 @@ const indexHTML = `<!doctype html>
     function renderLogs(tasks, lastErr) {
       const logs = [];
       for (const task of tasks) {
-        for (const log of (task.logs || [])) logs.push({ ...log, sha: task.sha });
+        for (const log of (task.logs || [])) {
+          if (log.step === 'error' && task.status !== 'failed') continue;
+          logs.push({ ...log, sha: task.sha, taskStatus: task.status, queueIndex: task.queue_index });
+        }
       }
       logs.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
       if (lastErr) logs.unshift({ step: 'last error', message: lastErr, time: '' });
@@ -345,12 +419,50 @@ const indexHTML = `<!doctype html>
         return;
       }
       el.innerHTML = logs.slice(0, 12).map(log =>
-        '<div class="log"><span class="log-step">' + escapeHTML(log.step) + '</span>' + escapeHTML(log.message) +
+        '<div class="log"><span class="log-step">' + escapeHTML(log.step) + '</span>' + escapeHTML(displayLogMessage(log)) +
         '<div class="log-time">' + escapeHTML(log.time || '') + '</div></div>'
       ).join('');
     }
 
     function shortSha(sha) { return (sha || '').slice(0, 12); }
+    function compareTasks(a, b) {
+      return queueIndex(a) - queueIndex(b) ||
+        (a.created_at || '').localeCompare(b.created_at || '') ||
+        (a.sha || '').localeCompare(b.sha || '');
+    }
+    function queueIndex(task) {
+      return Number.isFinite(task.queue_index) ? task.queue_index : Number.MAX_SAFE_INTEGER;
+    }
+    function displayIndex(task) {
+      const index = queueIndex(task);
+      return index === Number.MAX_SAFE_INTEGER ? '-' : String(index + 1);
+    }
+    function commitBounds(config) {
+      if (!config.queue) return '-';
+      return (config.queue.start_sha || '-') + ' -> ' + (config.queue.end_sha || '-');
+    }
+    function mappingText(config) {
+      const queue = config.queue ? (config.queue.remote + '/' + config.queue.branch) : '-';
+      const base = config.queue && config.queue.base_ref ? config.queue.base_ref : '-';
+      const mr = config.private ? (config.private.remote + '/' + branchTemplateText(config.private)) : '-';
+      const target = config.community ? (config.community.owner + '/' + config.community.repo + ':' + config.community.branch) : '-';
+      return base + '..' + queue + ' -> ' + mr + ' -> ' + target;
+    }
+    function branchTemplateText(privateConfig) {
+      const prefix = privateConfig.branch_prefix || 'mr-queue';
+      return (privateConfig.branch_template || '{prefix}-{sha12}').replaceAll('{prefix}', prefix);
+    }
+    function loopDelayText(workflow) {
+      if (!workflow) return '-';
+      return (workflow.loop_delay_min || '-') + ' .. ' + (workflow.loop_delay_max || workflow.loop_delay_min || '-');
+    }
+    function displayLogMessage(log) {
+      const message = String(log.message || '');
+      if (log.step === 'approval' && message.includes('Approval failed but continuing')) {
+        return 'Approval was rejected by the platform; continued because approval_failure_mode=warn';
+      }
+      return message;
+    }
     function escapeHTML(value) {
       return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'

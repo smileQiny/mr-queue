@@ -12,6 +12,9 @@ private:
   # MR branches are pushed here as one branch per commit.
   remote: "private"
   branch_prefix: "mr-queue"
+  # Placeholders: {prefix}, {title}, {title_or_sha12}, {sha12}, {sha}.
+  # Default is "{prefix}-{sha12}". A readable option is "{prefix}-{title_or_sha12}".
+  branch_template: "{prefix}-{sha12}"
   head_namespace: "your_private_namespace"
 
 community:
@@ -24,6 +27,8 @@ community:
 workflow:
   merge_method: "squash"
   review_comment: "已完成预审，确认合并。"
+  loop_delay_min: "1m"
+  loop_delay_max: "5m"
   stop_on_failure: true
 
 auth:

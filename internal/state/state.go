@@ -10,13 +10,16 @@ import (
 )
 
 const (
-	StatusPending  = "pending"
-	StatusRunning  = "running"
-	StatusPushed   = "pushed"
-	StatusMROpen   = "mr_open"
-	StatusReviewed = "reviewed"
-	StatusMerged   = "merged"
-	StatusFailed   = "failed"
+	StatusPending                = "pending"
+	StatusRunning                = "running"
+	StatusPushed                 = "pushed"
+	StatusMROpen                 = "mr_open"
+	StatusWaitingRequiredComment = "waiting_required_comment"
+	StatusWaitingExternalMerge   = "waiting_external_merge"
+	StatusReviewed               = "reviewed"
+	StatusMerged                 = "merged"
+	StatusSkipped                = "skipped"
+	StatusFailed                 = "failed"
 )
 
 type Store struct {
@@ -35,6 +38,7 @@ type Task struct {
 	SHA                string     `json:"sha"`
 	Subject            string     `json:"subject"`
 	Status             string     `json:"status"`
+	QueueIndex         int        `json:"queue_index"`
 	Branch             string     `json:"branch,omitempty"`
 	MRCommitSHA        string     `json:"mr_commit_sha,omitempty"`
 	CommunityCommitSHA string     `json:"community_commit_sha,omitempty"`
@@ -45,6 +49,11 @@ type Task struct {
 	CreatedAt          string     `json:"created_at"`
 	UpdatedAt          string     `json:"updated_at"`
 	Logs               []LogEntry `json:"logs"`
+}
+
+type QueueTask struct {
+	SHA     string
+	Subject string
 }
 
 type LogEntry struct {
@@ -103,6 +112,37 @@ func (s *Store) SetPaused(paused bool) error {
 }
 
 func (s *Store) UpsertTask(sha string, subject string) error {
+	return s.upsertTask(sha, subject, 0, false)
+}
+
+func (s *Store) UpsertTaskAt(sha string, subject string, queueIndex int) error {
+	return s.upsertTask(sha, subject, queueIndex, true)
+}
+
+func (s *Store) ReplaceQueueTasks(tasks []QueueTask) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := timestamp()
+	next := map[string]Task{}
+	for i, queueTask := range tasks {
+		task, ok := s.data.Tasks[queueTask.SHA]
+		if !ok {
+			task = Task{
+				SHA:       queueTask.SHA,
+				Status:    StatusPending,
+				CreatedAt: now,
+			}
+		}
+		task.Subject = queueTask.Subject
+		task.QueueIndex = i
+		task.UpdatedAt = now
+		next[queueTask.SHA] = task
+	}
+	s.data.Tasks = next
+	return s.saveLocked()
+}
+
+func (s *Store) upsertTask(sha string, subject string, queueIndex int, setIndex bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := timestamp()
@@ -116,6 +156,9 @@ func (s *Store) UpsertTask(sha string, subject string) error {
 		}
 	}
 	task.Subject = subject
+	if setIndex {
+		task.QueueIndex = queueIndex
+	}
 	task.UpdatedAt = now
 	s.data.Tasks[sha] = task
 	return s.saveLocked()

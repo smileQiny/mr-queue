@@ -20,6 +20,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(os.Args[2:])
+	case "sync-queue":
+		syncQueue(os.Args[2:])
 	case "run":
 		run(os.Args[2:])
 	case "dry-run":
@@ -45,6 +47,26 @@ func serve(args []string) {
 	srv := server.New(runtime)
 	fmt.Printf("mr-queue web panel: http://%s/\n", *addr)
 	log.Fatal(http.ListenAndServe(*addr, srv.Handler()))
+}
+
+func syncQueue(args []string) {
+	fs := flag.NewFlagSet("sync-queue", flag.ExitOnError)
+	configPath := fs.String("config", "mr-queue.yml", "path to YAML config")
+	envPath := fs.String("env", "", "path to .env file")
+	statePath := fs.String("state", "", "path to state JSON file")
+	skipFetch := fs.Bool("skip-fetch", false, "use existing local refs without fetching remotes")
+	_ = fs.Parse(args)
+
+	runtime, err := app.Build(*configPath, *envPath, *statePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	runtime.Runner.SetSkipFetch(*skipFetch)
+	count, err := runtime.Runner.SyncQueue()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("synced %d queue commits\n", count)
 }
 
 func run(args []string) {
@@ -80,6 +102,7 @@ func dryRun(args []string) {
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  mr-queue serve --config mr-queue.yml [--env .env] [--addr 127.0.0.1:8787]")
+	fmt.Fprintln(os.Stderr, "  mr-queue sync-queue --config mr-queue.yml [--env .env] [--skip-fetch]")
 	fmt.Fprintln(os.Stderr, "  mr-queue run --config mr-queue.yml [--env .env]")
 	fmt.Fprintln(os.Stderr, "  mr-queue dry-run --config mr-queue.yml [--env .env]")
 }

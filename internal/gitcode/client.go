@@ -25,15 +25,36 @@ type PullRequestInput struct {
 }
 
 type PullRequest struct {
-	Number  int    `json:"number"`
-	HTMLURL string `json:"html_url"`
+	Number         int    `json:"number"`
+	HTMLURL        string `json:"html_url"`
+	State          string `json:"state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+	HeadSHA        string `json:"head_sha"`
 }
 
 type Comment struct {
-	ID int `json:"id"`
+	ID   StringID `json:"id"`
+	Body string   `json:"body"`
 }
 
 type Review struct{}
+
+type StringID string
+
+func (id *StringID) UnmarshalJSON(body []byte) error {
+	var text string
+	if err := json.Unmarshal(body, &text); err == nil {
+		*id = StringID(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(body, &number); err != nil {
+		return err
+	}
+	*id = StringID(number.String())
+	return nil
+}
 
 type MergeInput struct {
 	MergeMethod string `json:"merge_method,omitempty"`
@@ -60,10 +81,22 @@ func (c *Client) CreatePull(owner string, repo string, input PullRequestInput) (
 	return out, err
 }
 
+func (c *Client) GetPull(owner string, repo string, number int) (PullRequest, error) {
+	var out PullRequest
+	err := c.request(http.MethodGet, pathFor(owner, repo, fmt.Sprintf("pulls/%d", number)), nil, &out)
+	return out, err
+}
+
 func (c *Client) CommentPull(owner string, repo string, number int, body string) (Comment, error) {
 	var out Comment
 	payload := map[string]string{"body": body}
 	err := c.request(http.MethodPost, pathFor(owner, repo, fmt.Sprintf("pulls/%d/comments", number)), payload, &out)
+	return out, err
+}
+
+func (c *Client) ListPullComments(owner string, repo string, number int) ([]Comment, error) {
+	var out []Comment
+	err := c.request(http.MethodGet, pathFor(owner, repo, fmt.Sprintf("pulls/%d/comments", number)), nil, &out)
 	return out, err
 }
 
@@ -80,9 +113,13 @@ func (c *Client) MergePull(owner string, repo string, number int, input MergeInp
 }
 
 func (c *Client) request(method string, path string, payload interface{}, out interface{}) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	var reader io.Reader
+	if payload != nil {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(body)
 	}
 	endpoint, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + path)
 	if err != nil {
@@ -92,7 +129,7 @@ func (c *Client) request(method string, path string, payload interface{}, out in
 	query.Set("access_token", c.token)
 	endpoint.RawQuery = query.Encode()
 
-	req, err := http.NewRequest(method, endpoint.String(), bytes.NewReader(body))
+	req, err := http.NewRequest(method, endpoint.String(), reader)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadReadsYAMLAndDotenvTokens(t *testing.T) {
@@ -72,6 +73,7 @@ queue:
 private:
   remote: "private"
   branch_prefix: "mr-queue"
+  branch_template: "{prefix}-{title}-{sha12}"
   head_namespace: "submitter"
 community:
   remote: "community"
@@ -80,6 +82,8 @@ community:
   branch: "master"
 workflow:
   merge_method: "squash"
+  loop_delay_min: "30s"
+  loop_delay_max: "90s"
 auth:
   submitter:
     token_env: "GITCODE_SUBMITTER_TOKEN"
@@ -105,6 +109,9 @@ GITCODE_MAINTAINER_TOKEN=merge-token
 	if cfg.Private.BranchPrefix != "mr-queue" {
 		t.Fatalf("private = %#v", cfg.Private)
 	}
+	if cfg.Private.BranchTemplate != "{prefix}-{title}-{sha12}" {
+		t.Fatalf("branch template = %q", cfg.Private.BranchTemplate)
+	}
 	if cfg.Community.Remote != "community" || cfg.Community.Branch != "master" {
 		t.Fatalf("community = %#v", cfg.Community)
 	}
@@ -116,6 +123,54 @@ GITCODE_MAINTAINER_TOKEN=merge-token
 	}
 	if cfg.Workflow.CommitRange != "community/master..private/queue" {
 		t.Fatalf("commit range = %q", cfg.Workflow.CommitRange)
+	}
+	if !cfg.Workflow.ShouldApprove() {
+		t.Fatal("approve should default to true")
+	}
+	if cfg.Workflow.LoopDelayMin != "30s" || cfg.Workflow.LoopDelayMax != "90s" {
+		t.Fatalf("loop delay = %q..%q", cfg.Workflow.LoopDelayMin, cfg.Workflow.LoopDelayMax)
+	}
+}
+
+func TestWorkflowDefaultsLoopDelayRangeToOneToFiveMinutes(t *testing.T) {
+	cfg := Config{}
+	cfg.applyDefaults()
+
+	if cfg.Workflow.LoopDelayMin != "1m" || cfg.Workflow.LoopDelayMax != "5m" {
+		t.Fatalf("loop delay defaults = %q..%q", cfg.Workflow.LoopDelayMin, cfg.Workflow.LoopDelayMax)
+	}
+	minDelay, maxDelay, err := cfg.Workflow.LoopDelayRange()
+	if err != nil {
+		t.Fatalf("LoopDelayRange returned error: %v", err)
+	}
+	if minDelay != time.Minute || maxDelay != 5*time.Minute {
+		t.Fatalf("parsed loop delay defaults = %s..%s", minDelay, maxDelay)
+	}
+}
+
+func TestLoadReadsApproveFalse(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+local:
+  path: "."
+workflow:
+  commit_range: "main..HEAD"
+  approve: false
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Workflow.ShouldApprove() {
+		t.Fatal("approve should be false")
 	}
 }
 

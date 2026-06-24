@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,9 +35,10 @@ type Queue struct {
 }
 
 type Private struct {
-	Remote        string `yaml:"remote" json:"remote"`
-	BranchPrefix  string `yaml:"branch_prefix" json:"branch_prefix"`
-	HeadNamespace string `yaml:"head_namespace" json:"head_namespace"`
+	Remote         string `yaml:"remote" json:"remote"`
+	BranchPrefix   string `yaml:"branch_prefix" json:"branch_prefix"`
+	BranchTemplate string `yaml:"branch_template" json:"branch_template"`
+	HeadNamespace  string `yaml:"head_namespace" json:"head_namespace"`
 }
 
 type Community struct {
@@ -47,11 +49,12 @@ type Community struct {
 }
 
 type Source struct {
-	LocalPath     string `yaml:"local_path" json:"local_path"`
-	BaseRef       string `yaml:"base_ref" json:"base_ref"`
-	Remote        string `yaml:"remote" json:"remote"`
-	BranchPrefix  string `yaml:"branch_prefix" json:"branch_prefix"`
-	HeadNamespace string `yaml:"head_namespace" json:"head_namespace"`
+	LocalPath      string `yaml:"local_path" json:"local_path"`
+	BaseRef        string `yaml:"base_ref" json:"base_ref"`
+	Remote         string `yaml:"remote" json:"remote"`
+	BranchPrefix   string `yaml:"branch_prefix" json:"branch_prefix"`
+	BranchTemplate string `yaml:"branch_template" json:"branch_template"`
+	HeadNamespace  string `yaml:"head_namespace" json:"head_namespace"`
 }
 
 type Target struct {
@@ -61,10 +64,55 @@ type Target struct {
 }
 
 type Workflow struct {
-	CommitRange   string `yaml:"commit_range" json:"commit_range"`
-	MergeMethod   string `yaml:"merge_method" json:"merge_method"`
-	ReviewComment string `yaml:"review_comment" json:"review_comment"`
-	StopOnFailure bool   `yaml:"stop_on_failure" json:"stop_on_failure"`
+	CommitRange         string `yaml:"commit_range" json:"commit_range"`
+	MergeMethod         string `yaml:"merge_method" json:"merge_method"`
+	ReviewComment       string `yaml:"review_comment" json:"review_comment"`
+	RequiredCommentText string `yaml:"required_comment_text" json:"required_comment_text"`
+	Approve             *bool  `yaml:"approve" json:"approve"`
+	ApprovalFailureMode string `yaml:"approval_failure_mode" json:"approval_failure_mode"`
+	LoopDelayMin        string `yaml:"loop_delay_min" json:"loop_delay_min"`
+	LoopDelayMax        string `yaml:"loop_delay_max" json:"loop_delay_max"`
+	StopOnFailure       bool   `yaml:"stop_on_failure" json:"stop_on_failure"`
+}
+
+func (w Workflow) ShouldApprove() bool {
+	return w.Approve == nil || *w.Approve
+}
+
+func (w Workflow) WarnOnApprovalFailure() bool {
+	return w.ApprovalFailureMode == "warn"
+}
+
+func (w Workflow) UsesExternalMerge() bool {
+	return w.MergeMethod == "external"
+}
+
+func (w Workflow) LoopDelayRange() (time.Duration, time.Duration, error) {
+	minDelay := 1200 * time.Millisecond
+	maxDelay := minDelay
+	if w.LoopDelayMin != "" {
+		parsed, err := time.ParseDuration(w.LoopDelayMin)
+		if err != nil {
+			return 0, 0, fmt.Errorf("parse workflow.loop_delay_min: %w", err)
+		}
+		minDelay = parsed
+	}
+	if w.LoopDelayMax != "" {
+		parsed, err := time.ParseDuration(w.LoopDelayMax)
+		if err != nil {
+			return 0, 0, fmt.Errorf("parse workflow.loop_delay_max: %w", err)
+		}
+		maxDelay = parsed
+	} else {
+		maxDelay = minDelay
+	}
+	if minDelay <= 0 || maxDelay <= 0 {
+		return 0, 0, fmt.Errorf("workflow loop delays must be positive")
+	}
+	if maxDelay < minDelay {
+		return 0, 0, fmt.Errorf("workflow.loop_delay_max must be >= workflow.loop_delay_min")
+	}
+	return minDelay, maxDelay, nil
 }
 
 type Auth struct {
@@ -129,6 +177,9 @@ func (c *Config) applyDefaults() {
 	if c.Private.BranchPrefix == "" {
 		c.Private.BranchPrefix = c.Source.BranchPrefix
 	}
+	if c.Private.BranchTemplate == "" {
+		c.Private.BranchTemplate = c.Source.BranchTemplate
+	}
 	if c.Private.HeadNamespace == "" {
 		c.Private.HeadNamespace = c.Source.HeadNamespace
 	}
@@ -166,6 +217,9 @@ func (c *Config) applyDefaults() {
 	if c.Source.BranchPrefix == "" {
 		c.Source.BranchPrefix = c.Private.BranchPrefix
 	}
+	if c.Source.BranchTemplate == "" {
+		c.Source.BranchTemplate = c.Private.BranchTemplate
+	}
 	if c.Source.HeadNamespace == "" {
 		c.Source.HeadNamespace = c.Private.HeadNamespace
 	}
@@ -179,6 +233,10 @@ func (c *Config) applyDefaults() {
 	if c.Private.BranchPrefix == "" {
 		c.Private.BranchPrefix = "mr-queue"
 		c.Source.BranchPrefix = "mr-queue"
+	}
+	if c.Private.BranchTemplate == "" {
+		c.Private.BranchTemplate = "{prefix}-{sha12}"
+		c.Source.BranchTemplate = "{prefix}-{sha12}"
 	}
 	if c.Target.Owner == "" {
 		c.Target.Owner = c.Community.Owner
@@ -198,6 +256,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Workflow.ReviewComment == "" {
 		c.Workflow.ReviewComment = "已完成预审，确认合并。"
+	}
+	if c.Workflow.ApprovalFailureMode == "" {
+		c.Workflow.ApprovalFailureMode = "fail"
+	}
+	if c.Workflow.LoopDelayMin == "" {
+		c.Workflow.LoopDelayMin = "1m"
+	}
+	if c.Workflow.LoopDelayMax == "" {
+		c.Workflow.LoopDelayMax = "5m"
 	}
 	if c.Workflow.CommitRange == "" && c.Queue.StartSHA != "" && c.Queue.EndSHA != "" {
 		c.Workflow.CommitRange = c.Queue.StartSHA + "^.." + c.Queue.EndSHA

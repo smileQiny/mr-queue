@@ -34,16 +34,20 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 		reviewerToken = cfg.Auth.Maintainer.Token
 	}
 	maintainerToken := cfg.Auth.Maintainer.Token
-	if maintainerToken == "" {
-		maintainerToken = reviewerToken
+	if reviewerToken == "" {
+		return nil, fmt.Errorf("reviewer token is required")
 	}
-	if reviewerToken == "" || maintainerToken == "" {
-		return nil, fmt.Errorf("reviewer and maintainer tokens are required")
+	if maintainerToken == "" && !cfg.Workflow.UsesExternalMerge() {
+		return nil, fmt.Errorf("maintainer token is required unless workflow.merge_method is external")
 	}
 	r := runner.New(
 		cfg,
 		store,
-		runner.LocalGitOps{Dir: cfg.Local.Path},
+		runner.LocalGitOps{
+			Dir:         cfg.Local.Path,
+			Username:    cfg.Private.HeadNamespace,
+			AccessToken: cfg.Auth.Submitter.Token,
+		},
 		submitter,
 		gitcode.NewClient(reviewerToken),
 		gitcode.NewClient(maintainerToken),

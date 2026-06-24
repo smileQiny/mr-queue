@@ -2,10 +2,13 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +16,8 @@ import (
 	"mr-queue/internal/gitcode"
 	"mr-queue/internal/state"
 )
+
+var ErrEmptyCherryPick = errors.New("empty cherry-pick")
 
 type Commit struct {
 	SHA     string
@@ -28,9 +33,20 @@ type GitOps interface {
 
 type PullClient interface {
 	CreatePull(owner string, repo string, input gitcode.PullRequestInput) (gitcode.PullRequest, error)
+	GetPull(owner string, repo string, number int) (gitcode.PullRequest, error)
 	CommentPull(owner string, repo string, number int, body string) (gitcode.Comment, error)
+	ListPullComments(owner string, repo string, number int) ([]gitcode.Comment, error)
 	ReviewPull(owner string, repo string, number int) (gitcode.Review, error)
 	MergePull(owner string, repo string, number int, input gitcode.MergeInput) (gitcode.MergeResult, error)
+}
+
+type LoopOptions struct {
+	MinDelay         time.Duration
+	MaxDelay         time.Duration
+	MaxMergedCommits int
+	WorkWindowStart  string
+	WorkWindowEnd    string
+	Now              func() time.Time
 }
 
 type Runner struct {
@@ -40,6 +56,7 @@ type Runner struct {
 	submitter  PullClient
 	reviewer   PullClient
 	maintainer PullClient
+	skipFetch  bool
 }
 
 func New(cfg config.Config, store *state.Store, gitOps GitOps, submitter PullClient, reviewer PullClient, maintainer PullClient) *Runner {
@@ -53,26 +70,30 @@ func New(cfg config.Config, store *state.Store, gitOps GitOps, submitter PullCli
 	}
 }
 
+func (r *Runner) SetSkipFetch(skipFetch bool) {
+	r.skipFetch = skipFetch
+}
+
 func (r *Runner) RunOnce() error {
 	if r.store.Snapshot().Paused {
 		return nil
 	}
-	if err := r.gitOps.RefreshRefs(r.remotesToRefresh()); err != nil {
+	if err := r.refreshRefs(); err != nil {
 		return err
 	}
 	commits, err := r.gitOps.ListCommits(r.cfg.Workflow.CommitRange)
 	if err != nil {
 		return err
 	}
-	for _, commit := range commits {
-		if err := r.store.UpsertTask(commit.SHA, commit.Subject); err != nil {
+	for i, commit := range commits {
+		if err := r.store.UpsertTaskAt(commit.SHA, commit.Subject, i); err != nil {
 			return err
 		}
 		task := r.store.Snapshot().Tasks[commit.SHA]
-		if task.Status == state.StatusMerged {
+		if task.Status == state.StatusMerged || task.Status == state.StatusSkipped {
 			continue
 		}
-		if task.Status != "" && task.Status != state.StatusPending {
+		if task.Status != "" && task.Status != state.StatusPending && task.Status != state.StatusWaitingRequiredComment && task.Status != state.StatusWaitingExternalMerge {
 			continue
 		}
 		return r.process(commit)
@@ -80,94 +101,307 @@ func (r *Runner) RunOnce() error {
 	return nil
 }
 
-func (r *Runner) RunLoop(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		delay = time.Second
+func (r *Runner) SyncQueue() (int, error) {
+	if err := r.refreshRefs(); err != nil {
+		return 0, err
 	}
+	commits, err := r.gitOps.ListCommits(r.cfg.Workflow.CommitRange)
+	if err != nil {
+		return 0, err
+	}
+	queueTasks := make([]state.QueueTask, 0, len(commits))
+	for _, commit := range commits {
+		queueTasks = append(queueTasks, state.QueueTask{SHA: commit.SHA, Subject: commit.Subject})
+	}
+	if err := r.store.ReplaceQueueTasks(queueTasks); err != nil {
+		return 0, err
+	}
+	return len(commits), nil
+}
+
+func (r *Runner) RefreshWaiting() error {
+	snapshot := r.store.Snapshot()
+	for _, task := range snapshot.Tasks {
+		switch task.Status {
+		case state.StatusWaitingExternalMerge:
+			if err := r.checkExternalMerge(task.SHA, task.MRNumber); err != nil {
+				return err
+			}
+		case state.StatusWaitingRequiredComment:
+			if task.MRNumber == 0 || r.cfg.Workflow.RequiredCommentText == "" {
+				continue
+			}
+			ok, err := r.hasRequiredComment(task.MRNumber)
+			if err != nil {
+				_ = r.fail(task.SHA, err)
+				return err
+			}
+			if !ok {
+				continue
+			}
+			commit := Commit{SHA: task.SHA, Subject: task.Subject}
+			if err := r.process(commit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Runner) refreshRefs() error {
+	if r.skipFetch {
+		return nil
+	}
+	return r.gitOps.RefreshRefs(r.remotesToRefresh())
+}
+
+func (r *Runner) RunLoop(ctx context.Context, delay time.Duration) error {
+	return r.RunLoopRange(ctx, delay, delay)
+}
+
+func (r *Runner) RunLoopRange(ctx context.Context, minDelay time.Duration, maxDelay time.Duration) error {
+	return r.RunLoopWithOptions(ctx, LoopOptions{MinDelay: minDelay, MaxDelay: maxDelay})
+}
+
+func (r *Runner) RunLoopWithOptions(ctx context.Context, options LoopOptions) error {
+	minDelay := options.MinDelay
+	maxDelay := options.MaxDelay
+	if minDelay <= 0 {
+		minDelay = time.Second
+	}
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	mergedCount := 0
 	for {
 		before := r.store.Snapshot()
 		if before.Paused {
+			return nil
+		}
+		inWindow, err := inWorkWindow(now(), options.WorkWindowStart, options.WorkWindowEnd)
+		if err != nil {
+			return err
+		}
+		if !inWindow {
 			return nil
 		}
 		if err := r.RunOnce(); err != nil {
 			return err
 		}
 		after := r.store.Snapshot()
-		if sameSnapshotProgress(before, after) {
+		mergedCount += newlyMergedCount(before, after)
+		if options.MaxMergedCommits > 0 && mergedCount >= options.MaxMergedCommits {
+			return nil
+		}
+		if sameSnapshotProgress(before, after) && !hasWaitingTask(after) {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(randomDelay(minDelay, maxDelay)):
 		}
 	}
 }
 
+func inWorkWindow(now time.Time, start string, end string) (bool, error) {
+	if strings.TrimSpace(start) == "" || strings.TrimSpace(end) == "" {
+		return true, nil
+	}
+	startMinute, err := parseClockMinute(start)
+	if err != nil {
+		return false, fmt.Errorf("parse work_window_start: %w", err)
+	}
+	endMinute, err := parseClockMinute(end)
+	if err != nil {
+		return false, fmt.Errorf("parse work_window_end: %w", err)
+	}
+	currentMinute := now.Hour()*60 + now.Minute()
+	if startMinute <= endMinute {
+		return currentMinute >= startMinute && currentMinute <= endMinute, nil
+	}
+	return currentMinute >= startMinute || currentMinute <= endMinute, nil
+}
+
+func parseClockMinute(value string) (int, error) {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("expected HH:MM")
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, err
+	}
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, err
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, fmt.Errorf("expected HH:MM")
+	}
+	return hour*60 + minute, nil
+}
+
+func newlyMergedCount(before state.Snapshot, after state.Snapshot) int {
+	count := 0
+	for sha, afterTask := range after.Tasks {
+		if afterTask.Status != state.StatusMerged {
+			continue
+		}
+		beforeTask, ok := before.Tasks[sha]
+		if !ok || beforeTask.Status != state.StatusMerged {
+			count++
+		}
+	}
+	return count
+}
+
+func hasWaitingTask(snapshot state.Snapshot) bool {
+	for _, task := range snapshot.Tasks {
+		if task.Status == state.StatusWaitingRequiredComment || task.Status == state.StatusWaitingExternalMerge {
+			return true
+		}
+	}
+	return false
+}
+
+func randomDelay(minDelay time.Duration, maxDelay time.Duration) time.Duration {
+	if maxDelay <= minDelay {
+		return minDelay
+	}
+	return minDelay + time.Duration(rand.Int64N(int64(maxDelay-minDelay)+1))
+}
+
 func (r *Runner) process(commit Commit) error {
 	sha := commit.SHA
+	task := r.store.Snapshot().Tasks[sha]
+	if task.Status == state.StatusWaitingExternalMerge {
+		return r.checkExternalMerge(sha, task.MRNumber)
+	}
 	if err := r.store.SetTaskStatus(sha, state.StatusRunning, ""); err != nil {
 		return err
 	}
-	branch := branchName(r.privateBranchPrefix(), sha)
-	if err := r.store.SetTaskBranch(sha, branch); err != nil {
-		return err
-	}
-	if err := r.store.AppendLog(sha, "push", fmt.Sprintf("Pushing %s to %s", sha, branch)); err != nil {
-		return err
-	}
-	mrCommitSHA, err := r.gitOps.PushSingleCommitBranch(commit, branch, r.queueBaseRef(), r.privateRemote())
-	if err != nil {
-		_ = r.fail(sha, err)
-		return err
-	}
-	if err := r.store.SetTaskMRCommit(sha, mrCommitSHA); err != nil {
-		return err
-	}
-	if err := r.store.SetTaskStatus(sha, state.StatusPushed, ""); err != nil {
-		return err
+	task = r.store.Snapshot().Tasks[sha]
+	prNumber := task.MRNumber
+	if prNumber == 0 {
+		branch := task.Branch
+		if branch == "" {
+			branch = r.branchName(commit)
+			if err := r.store.SetTaskBranch(sha, branch); err != nil {
+				return err
+			}
+		}
+		if task.MRCommitSHA == "" {
+			if err := r.store.AppendLog(sha, "push", fmt.Sprintf("Pushing %s to %s", sha, branch)); err != nil {
+				return err
+			}
+			mrCommitSHA, err := r.gitOps.PushSingleCommitBranch(commit, branch, r.queueBaseRef(), r.privateRemote())
+			if err != nil {
+				if errors.Is(err, ErrEmptyCherryPick) {
+					if err := r.store.SetTaskStatus(sha, state.StatusSkipped, ""); err != nil {
+						return err
+					}
+					return r.store.AppendLog(sha, "skip", "Patch already exists on target base; skipped empty cherry-pick")
+				}
+				_ = r.fail(sha, err)
+				return err
+			}
+			if err := r.store.SetTaskMRCommit(sha, mrCommitSHA); err != nil {
+				return err
+			}
+			if err := r.store.SetTaskStatus(sha, state.StatusPushed, ""); err != nil {
+				return err
+			}
+		}
+
+		head := branch
+		if r.privateHeadNamespace() != "" && r.privateHeadNamespace() != r.communityOwner() {
+			head = r.privateHeadNamespace() + ":" + branch
+		}
+		pr, err := r.submitter.CreatePull(r.communityOwner(), r.communityRepo(), gitcode.PullRequestInput{
+			Title: commit.Subject,
+			Head:  head,
+			Base:  r.communityBranch(),
+			Body:  commit.Body,
+		})
+		if err != nil {
+			_ = r.fail(sha, err)
+			return err
+		}
+		prNumber = pr.Number
+		if err := r.store.SetTaskMR(sha, pr.Number, pr.HTMLURL); err != nil {
+			return err
+		}
+		if err := r.store.SetTaskStatus(sha, state.StatusMROpen, ""); err != nil {
+			return err
+		}
+		if err := r.store.AppendLog(sha, "mr", fmt.Sprintf("Created MR #%d", pr.Number)); err != nil {
+			return err
+		}
 	}
 
-	head := branch
-	if r.privateHeadNamespace() != "" {
-		head = r.privateHeadNamespace() + ":" + branch
-	}
-	pr, err := r.submitter.CreatePull(r.communityOwner(), r.communityRepo(), gitcode.PullRequestInput{
-		Title: commit.Subject,
-		Head:  head,
-		Base:  r.communityBranch(),
-		Body:  commit.Body,
-	})
-	if err != nil {
-		_ = r.fail(sha, err)
-		return err
-	}
-	if err := r.store.SetTaskMR(sha, pr.Number, pr.HTMLURL); err != nil {
-		return err
-	}
-	if err := r.store.SetTaskStatus(sha, state.StatusMROpen, ""); err != nil {
-		return err
-	}
-	if err := r.store.AppendLog(sha, "mr", fmt.Sprintf("Created MR #%d", pr.Number)); err != nil {
-		return err
+	if r.cfg.Workflow.RequiredCommentText != "" {
+		ok, err := r.hasRequiredComment(prNumber)
+		if err != nil {
+			_ = r.fail(sha, err)
+			return err
+		}
+		if !ok {
+			if task.Status != state.StatusWaitingRequiredComment {
+				if err := r.store.SetTaskStatus(sha, state.StatusWaitingRequiredComment, ""); err != nil {
+					return err
+				}
+				if err := r.store.AppendLog(sha, "wait", "Waiting for required comment: "+r.cfg.Workflow.RequiredCommentText); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if task.Status == state.StatusWaitingRequiredComment {
+			if err := r.store.AppendLog(sha, "wait", "Required comment found: "+r.cfg.Workflow.RequiredCommentText); err != nil {
+				return err
+			}
+		}
 	}
 
-	if _, err := r.reviewer.CommentPull(r.communityOwner(), r.communityRepo(), pr.Number, r.cfg.Workflow.ReviewComment); err != nil {
+	if _, err := r.reviewer.CommentPull(r.communityOwner(), r.communityRepo(), prNumber, r.cfg.Workflow.ReviewComment); err != nil {
 		_ = r.fail(sha, err)
 		return err
 	}
-	if _, err := r.reviewer.ReviewPull(r.communityOwner(), r.communityRepo(), pr.Number); err != nil {
-		_ = r.fail(sha, err)
-		return err
+	if r.cfg.Workflow.ShouldApprove() {
+		if _, err := r.reviewer.ReviewPull(r.communityOwner(), r.communityRepo(), prNumber); err != nil {
+			if r.cfg.Workflow.WarnOnApprovalFailure() {
+				if logErr := r.store.AppendLog(sha, "approval", "Approval was rejected by the platform; continuing because approval_failure_mode=warn"); logErr != nil {
+					return logErr
+				}
+			} else {
+				_ = r.fail(sha, err)
+				return err
+			}
+		}
 	}
 	if err := r.store.SetTaskStatus(sha, state.StatusReviewed, ""); err != nil {
 		return err
 	}
-	if err := r.store.AppendLog(sha, "review", "Submitted review comment and approval"); err != nil {
+	reviewLog := "Submitted review comment"
+	if r.cfg.Workflow.ShouldApprove() {
+		reviewLog += " and approval"
+	}
+	if err := r.store.AppendLog(sha, "review", reviewLog); err != nil {
 		return err
 	}
+	if r.cfg.Workflow.MergeMethod == "external" {
+		if err := r.store.SetTaskStatus(sha, state.StatusWaitingExternalMerge, ""); err != nil {
+			return err
+		}
+		return r.store.AppendLog(sha, "merge", fmt.Sprintf("Waiting for external merge of MR #%d", prNumber))
+	}
 
-	mergeResult, err := r.maintainer.MergePull(r.communityOwner(), r.communityRepo(), pr.Number, gitcode.MergeInput{MergeMethod: r.cfg.Workflow.MergeMethod})
+	mergeResult, err := r.maintainer.MergePull(r.communityOwner(), r.communityRepo(), prNumber, gitcode.MergeInput{MergeMethod: r.cfg.Workflow.MergeMethod})
 	if err != nil {
 		_ = r.fail(sha, err)
 		return err
@@ -180,7 +414,44 @@ func (r *Runner) process(commit Commit) error {
 	if err := r.store.SetTaskStatus(sha, state.StatusMerged, ""); err != nil {
 		return err
 	}
-	return r.store.AppendLog(sha, "merge", fmt.Sprintf("Merged MR #%d", pr.Number))
+	return r.store.AppendLog(sha, "merge", fmt.Sprintf("Merged MR #%d", prNumber))
+}
+
+func (r *Runner) hasRequiredComment(prNumber int) (bool, error) {
+	comments, err := r.reviewer.ListPullComments(r.communityOwner(), r.communityRepo(), prNumber)
+	if err != nil {
+		return false, err
+	}
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, r.cfg.Workflow.RequiredCommentText) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *Runner) checkExternalMerge(sha string, prNumber int) error {
+	pr, err := r.reviewer.GetPull(r.communityOwner(), r.communityRepo(), prNumber)
+	if err != nil {
+		_ = r.fail(sha, err)
+		return err
+	}
+	if !pr.Merged && pr.State != "merged" {
+		return nil
+	}
+	mergeSHA := pr.MergeCommitSHA
+	if mergeSHA == "" {
+		mergeSHA = pr.HeadSHA
+	}
+	if mergeSHA != "" {
+		if err := r.store.SetTaskCommunityCommit(sha, mergeSHA); err != nil {
+			return err
+		}
+	}
+	if err := r.store.SetTaskStatus(sha, state.StatusMerged, ""); err != nil {
+		return err
+	}
+	return r.store.AppendLog(sha, "merge", fmt.Sprintf("External merge completed for MR #%d", prNumber))
 }
 
 func (r *Runner) remotesToRefresh() []string {
@@ -207,6 +478,20 @@ func (r *Runner) privateBranchPrefix() string {
 		return r.cfg.Private.BranchPrefix
 	}
 	return r.cfg.Source.BranchPrefix
+}
+
+func (r *Runner) privateBranchTemplate() string {
+	if r.cfg.Private.BranchTemplate != "" {
+		return r.cfg.Private.BranchTemplate
+	}
+	if r.cfg.Source.BranchTemplate != "" {
+		return r.cfg.Source.BranchTemplate
+	}
+	return "{prefix}-{sha12}"
+}
+
+func (r *Runner) branchName(commit Commit) string {
+	return branchName(r.privateBranchTemplate(), r.privateBranchPrefix(), commit)
 }
 
 func (r *Runner) privateHeadNamespace() string {
@@ -252,7 +537,9 @@ func (r *Runner) fail(sha string, err error) error {
 }
 
 type LocalGitOps struct {
-	Dir string
+	Dir         string
+	Username    string
+	AccessToken string
 }
 
 func (g LocalGitOps) RefreshRefs(remotes []string) error {
@@ -313,12 +600,17 @@ func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, ba
 		return "", err
 	}
 
-	worktree := LocalGitOps{Dir: tmpDir}
+	worktree := LocalGitOps{Dir: tmpDir, Username: g.Username, AccessToken: g.AccessToken}
 	if err := worktree.run("checkout", "-B", tmpBranch); err != nil {
 		_ = g.run("worktree", "remove", "--force", tmpDir)
 		return "", err
 	}
 	if err := worktree.run("cherry-pick", commit.SHA); err != nil {
+		if isEmptyCherryPickError(err) {
+			_ = worktree.run("cherry-pick", "--abort")
+			_ = g.run("worktree", "remove", "--force", tmpDir)
+			return "", ErrEmptyCherryPick
+		}
 		_ = g.run("worktree", "remove", "--force", tmpDir)
 		return "", err
 	}
@@ -341,11 +633,25 @@ func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, ba
 	return mrCommitSHA, nil
 }
 
+func isEmptyCherryPickError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "previous cherry-pick is now empty") ||
+		strings.Contains(text, "nothing to commit, working tree clean")
+}
+
 func (g LocalGitOps) git(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if g.Dir != "" {
 		cmd.Dir = filepath.Clean(g.Dir)
 	}
+	cleanup, err := g.configureCredentialEnv(cmd)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s failed: %w\n%s", strings.Join(args, " "), err, string(out))
@@ -353,17 +659,110 @@ func (g LocalGitOps) git(args ...string) (string, error) {
 	return string(out), nil
 }
 
+func (g LocalGitOps) configureCredentialEnv(cmd *exec.Cmd) (func(), error) {
+	if g.AccessToken == "" {
+		return func() {}, nil
+	}
+	username := strings.TrimSpace(g.Username)
+	if username == "" {
+		username = "git"
+	}
+	dir, err := os.MkdirTemp("", "mr-queue-askpass-*")
+	if err != nil {
+		return nil, err
+	}
+	askpass := filepath.Join(dir, "askpass.sh")
+	body := `#!/bin/sh
+case "$1" in
+*Username*) printf '%s\n' "$MR_QUEUE_GIT_USERNAME" ;;
+*) printf '%s\n' "$MR_QUEUE_GIT_PASSWORD" ;;
+esac
+`
+	if err := os.WriteFile(askpass, []byte(body), 0700); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_ASKPASS="+askpass,
+		"GIT_TERMINAL_PROMPT=0",
+		"MR_QUEUE_GIT_USERNAME="+username,
+		"MR_QUEUE_GIT_PASSWORD="+g.AccessToken,
+	)
+	return func() { _ = os.RemoveAll(dir) }, nil
+}
+
 func (g LocalGitOps) run(args ...string) error {
 	_, err := g.git(args...)
 	return err
 }
 
-func branchName(prefix string, sha string) string {
-	short := sha
-	if len(short) > 12 {
-		short = short[:12]
+func branchName(template string, prefix string, commit Commit) string {
+	short := shortSHA(commit.SHA)
+	title := slugifyBranchPart(commit.Subject, 60)
+	titleOrSHA := slugifyBranchPartOrEmpty(commit.Subject, 60)
+	if titleOrSHA == "" {
+		titleOrSHA = short
 	}
-	return strings.TrimRight(prefix, "-") + "-" + short
+	replacer := strings.NewReplacer(
+		"{prefix}", slugifyBranchPart(prefix, 40),
+		"{title_or_sha12}", titleOrSHA,
+		"{title}", title,
+		"{sha12}", short,
+		"{sha}", commit.SHA,
+	)
+	name := replacer.Replace(template)
+	name = normalizeBranchName(name)
+	if name == "" {
+		name = "commit-" + short
+	}
+	return strings.Trim(name, "-./")
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+func slugifyBranchPart(value string, maxLen int) string {
+	return trimBranchPart(normalizeBranchName(value), maxLen)
+}
+
+func slugifyBranchPartOrEmpty(value string, maxLen int) string {
+	return trimBranchPartOrEmpty(normalizeBranchName(value), maxLen)
+}
+
+func normalizeBranchName(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func trimBranchPart(value string, maxLen int) string {
+	if value == "" {
+		return "commit"
+	}
+	return trimBranchPartOrEmpty(value, maxLen)
+}
+
+func trimBranchPartOrEmpty(value string, maxLen int) string {
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value
+	}
+	value = strings.TrimRight(value[:maxLen], "-")
+	return value
 }
 
 func sameSnapshotProgress(before state.Snapshot, after state.Snapshot) bool {

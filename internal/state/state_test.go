@@ -79,3 +79,74 @@ func TestRetryFailedTaskMarksPendingAndKeepsHistory(t *testing.T) {
 		t.Fatalf("attempts = %d", task.Attempts)
 	}
 }
+
+func TestQueueIndexPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+
+	if err := store.UpsertTaskAt("abc123", "Add docs", 7); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen returned error: %v", err)
+	}
+	task := reopened.Snapshot().Tasks["abc123"]
+	if task.QueueIndex != 7 {
+		t.Fatalf("queue index = %d", task.QueueIndex)
+	}
+}
+
+func TestReplaceQueueTasksRemovesTasksOutsideCurrentQueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+
+	if err := store.UpsertTaskAt("old", "Old task", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("old", StatusFailed, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTaskAt("keep", "Keep old subject", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("keep", StatusMerged, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.ReplaceQueueTasks([]QueueTask{
+		{SHA: "keep", Subject: "Keep new subject"},
+		{SHA: "new", Subject: "New task"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks := store.Snapshot().Tasks
+	if _, ok := tasks["old"]; ok {
+		t.Fatalf("old task was not removed: %#v", tasks["old"])
+	}
+	keep := tasks["keep"]
+	if keep.Status != StatusMerged {
+		t.Fatalf("keep status = %q", keep.Status)
+	}
+	if keep.Subject != "Keep new subject" {
+		t.Fatalf("keep subject = %q", keep.Subject)
+	}
+	if keep.QueueIndex != 0 {
+		t.Fatalf("keep queue index = %d", keep.QueueIndex)
+	}
+	newTask := tasks["new"]
+	if newTask.Status != StatusPending {
+		t.Fatalf("new status = %q", newTask.Status)
+	}
+	if newTask.QueueIndex != 1 {
+		t.Fatalf("new queue index = %d", newTask.QueueIndex)
+	}
+}
