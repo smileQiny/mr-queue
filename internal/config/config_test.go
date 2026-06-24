@@ -119,6 +119,45 @@ GITCODE_MAINTAINER_TOKEN=merge-token
 	}
 }
 
+func TestLoadDerivesBoundedCommitRangeFromStartAndEndSHA(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+local:
+  path: "."
+queue:
+  remote: "private"
+  branch: "new-features"
+  base_ref: "community/master"
+  start_sha: "47824259"
+  end_sha: "1660a7c4"
+private:
+  remote: "private"
+  branch_prefix: "mr-queue"
+  head_namespace: "smileQiny"
+community:
+  remote: "community"
+  owner: "openeuler"
+  repo: "syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Workflow.CommitRange != "47824259^..1660a7c4" {
+		t.Fatalf("commit range = %q", cfg.Workflow.CommitRange)
+	}
+}
+
 func TestLoadMissingTokenReturnsClearError(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "mr-queue.yml")

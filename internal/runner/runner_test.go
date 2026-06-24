@@ -123,6 +123,57 @@ func TestRunOnceProcessesOneCommitToMergedState(t *testing.T) {
 	}
 }
 
+func TestRunOnceDoesNotRestartInFlightTask(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTask("abcdef123456", "Add feature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("abcdef123456", state.StatusMROpen, ""); err != nil {
+		t.Fatal(err)
+	}
+	submitter := &fakeClient{}
+	reviewer := &fakeClient{}
+	maintainer := &fakeClient{}
+	gitOps := &fakeGitOps{}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			Branch:  "new-features",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:        "private",
+			BranchPrefix:  "mr-queue",
+			HeadNamespace: "smileQiny",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:   "47824259^..1660a7c4",
+			MergeMethod:   "squash",
+			ReviewComment: "Reviewed and approved.",
+		},
+	}, store, gitOps, submitter, reviewer, maintainer)
+
+	if err := r.RunOnce(); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if len(gitOps.pushed) != 0 {
+		t.Fatalf("unexpected push for in-flight task: %#v", gitOps.pushed)
+	}
+	if len(submitter.actions) != 0 || len(reviewer.actions) != 0 || len(maintainer.actions) != 0 {
+		t.Fatalf("unexpected API actions: submitter=%#v reviewer=%#v maintainer=%#v", submitter.actions, reviewer.actions, maintainer.actions)
+	}
+}
+
 func TestLocalGitOpsListCommitsReturnsEmptyForRepoWithoutCommits(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")

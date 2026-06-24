@@ -26,9 +26,11 @@ type Local struct {
 }
 
 type Queue struct {
-	Remote  string `yaml:"remote" json:"remote"`
-	Branch  string `yaml:"branch" json:"branch"`
-	BaseRef string `yaml:"base_ref" json:"base_ref"`
+	Remote   string `yaml:"remote" json:"remote"`
+	Branch   string `yaml:"branch" json:"branch"`
+	BaseRef  string `yaml:"base_ref" json:"base_ref"`
+	StartSHA string `yaml:"start_sha" json:"start_sha"`
+	EndSHA   string `yaml:"end_sha" json:"end_sha"`
 }
 
 type Private struct {
@@ -196,6 +198,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Workflow.ReviewComment == "" {
 		c.Workflow.ReviewComment = "已完成预审，确认合并。"
+	}
+	if c.Workflow.CommitRange == "" && c.Queue.StartSHA != "" && c.Queue.EndSHA != "" {
+		c.Workflow.CommitRange = c.Queue.StartSHA + "^.." + c.Queue.EndSHA
 	}
 	if c.Workflow.CommitRange == "" && c.Queue.Remote != "" && c.Queue.Branch != "" && c.Queue.BaseRef != "" {
 		c.Workflow.CommitRange = c.Queue.BaseRef + ".." + c.Queue.Remote + "/" + c.Queue.Branch

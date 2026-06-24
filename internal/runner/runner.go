@@ -72,6 +72,9 @@ func (r *Runner) RunOnce() error {
 		if task.Status == state.StatusMerged {
 			continue
 		}
+		if task.Status != "" && task.Status != state.StatusPending {
+			continue
+		}
 		return r.process(commit)
 	}
 	return nil
