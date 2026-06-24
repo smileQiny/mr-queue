@@ -632,7 +632,7 @@ func TestRunLoopKeepsPollingWaitingExternalMerge(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
-	err = r.RunLoopRange(ctx, time.Millisecond, time.Millisecond)
+	_, err = r.RunLoopRange(ctx, time.Millisecond, time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunLoopRange returned %v, want context deadline", err)
 	}
@@ -689,13 +689,16 @@ func TestRunLoopStopsAfterConfiguredMergedCount(t *testing.T) {
 		},
 	}, store, gitOps, submitter, reviewer, &fakeClient{})
 
-	err = r.RunLoopWithOptions(context.Background(), LoopOptions{
+	result, err := r.RunLoopWithOptions(context.Background(), LoopOptions{
 		MinDelay:         time.Millisecond,
 		MaxDelay:         time.Millisecond,
 		MaxMergedCommits: 1,
 	})
 	if err != nil {
 		t.Fatalf("RunLoopWithOptions returned error: %v", err)
+	}
+	if result.StopReason != "reached max merged commits: 1/1" {
+		t.Fatalf("stop reason = %q", result.StopReason)
 	}
 
 	tasks := store.Snapshot().Tasks
@@ -706,6 +709,92 @@ func TestRunLoopStopsAfterConfiguredMergedCount(t *testing.T) {
 		t.Fatalf("second status = %q", tasks["second12345678"].Status)
 	}
 	if len(submitter.actions) != 1 {
+		t.Fatalf("submitter actions = %#v", submitter.actions)
+	}
+}
+
+func TestRunLoopMergedLimitIgnoresTasksAlreadyWaitingAtStart(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTaskAt("alreadywaiting1", "Already waiting", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskMR("alreadywaiting1", 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("alreadywaiting1", state.StatusWaitingExternalMerge, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTaskAt("firstpending12", "First pending", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTaskAt("secondpending1", "Second pending", 2); err != nil {
+		t.Fatal(err)
+	}
+	gitOps := &fakeGitOps{
+		commits: []Commit{
+			{SHA: "alreadywaiting1", Subject: "Already waiting"},
+			{SHA: "firstpending12", Subject: "First pending"},
+			{SHA: "secondpending1", Subject: "Second pending"},
+		},
+	}
+	submitter := &fakeClient{nextNumber: 11}
+	reviewer := &fakeClient{
+		comments: []gitcode.Comment{{Body: "CLA Signature Pass"}},
+		pulls: []gitcode.PullRequest{
+			{Number: 10, State: "merged", Merged: true, MergeCommitSHA: "already-merged"},
+			{Number: 11, State: "merged", Merged: true, MergeCommitSHA: "first-merged"},
+			{Number: 12, State: "merged", Merged: true, MergeCommitSHA: "second-merged"},
+		},
+	}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:         "main..HEAD",
+			MergeMethod:         "external",
+			ReviewComment:       "/lgtm\n/approve",
+			RequiredCommentText: "CLA Signature Pass",
+			Approve:             boolPtr(false),
+		},
+	}, store, gitOps, submitter, reviewer, &fakeClient{})
+
+	_, err = r.RunLoopWithOptions(context.Background(), LoopOptions{
+		WaitCheckDelayMin: time.Millisecond,
+		WaitCheckDelayMax: time.Millisecond,
+		NextPRDelayMin:    time.Millisecond,
+		NextPRDelayMax:    time.Millisecond,
+		MaxMergedCommits:  2,
+	})
+	if err != nil {
+		t.Fatalf("RunLoopWithOptions returned error: %v", err)
+	}
+
+	tasks := store.Snapshot().Tasks
+	if tasks["alreadywaiting1"].Status != state.StatusMerged {
+		t.Fatalf("already waiting status = %q", tasks["alreadywaiting1"].Status)
+	}
+	if tasks["firstpending12"].Status != state.StatusMerged {
+		t.Fatalf("first pending status = %q", tasks["firstpending12"].Status)
+	}
+	if tasks["secondpending1"].Status != state.StatusMerged {
+		t.Fatalf("second pending status = %q", tasks["secondpending1"].Status)
+	}
+	if len(submitter.actions) != 2 {
 		t.Fatalf("submitter actions = %#v", submitter.actions)
 	}
 }
@@ -741,7 +830,7 @@ func TestRunLoopStopsOutsideConfiguredWorkWindow(t *testing.T) {
 		},
 	}, store, gitOps, submitter, &fakeClient{}, &fakeClient{})
 
-	err = r.RunLoopWithOptions(context.Background(), LoopOptions{
+	_, err = r.RunLoopWithOptions(context.Background(), LoopOptions{
 		MinDelay:        time.Millisecond,
 		MaxDelay:        time.Millisecond,
 		WorkWindowStart: "08:00",
@@ -758,6 +847,84 @@ func TestRunLoopStopsOutsideConfiguredWorkWindow(t *testing.T) {
 	}
 	if len(submitter.actions) != 0 {
 		t.Fatalf("unexpected MR outside work window: %#v", submitter.actions)
+	}
+}
+
+func TestRunLoopUsesWaitCheckDelayUntilMergedThenNextPRDelay(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitOps := &fakeGitOps{
+		commits: []Commit{
+			{SHA: "first123456789", Subject: "First"},
+			{SHA: "second12345678", Subject: "Second"},
+		},
+	}
+	submitter := &fakeClient{nextNumber: 11}
+	reviewer := &fakeClient{
+		comments: []gitcode.Comment{{Body: "CLA Signature Pass"}},
+		pulls: []gitcode.PullRequest{
+			{Number: 11, State: "open"},
+			{Number: 11, State: "merged", Merged: true, MergeCommitSHA: "first-merged"},
+		},
+	}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:         "main..HEAD",
+			MergeMethod:         "external",
+			ReviewComment:       "/lgtm\n/approve",
+			RequiredCommentText: "CLA Signature Pass",
+			Approve:             boolPtr(false),
+		},
+	}, store, gitOps, submitter, reviewer, &fakeClient{})
+
+	var sleeps []time.Duration
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = r.RunLoopWithOptions(ctx, LoopOptions{
+		WaitCheckDelayMin: time.Second,
+		WaitCheckDelayMax: time.Second,
+		NextPRDelayMin:    5 * time.Second,
+		NextPRDelayMax:    5 * time.Second,
+		Sleep: func(ctx context.Context, delay time.Duration) error {
+			sleeps = append(sleeps, delay)
+			if len(sleeps) >= 3 {
+				cancel()
+				return context.Canceled
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunLoopWithOptions returned %v, want context canceled", err)
+	}
+
+	if len(sleeps) != 3 {
+		t.Fatalf("sleeps = %#v", sleeps)
+	}
+	if sleeps[0] != time.Second || sleeps[1] != time.Second {
+		t.Fatalf("wait sleeps = %#v", sleeps[:2])
+	}
+	if sleeps[2] != 5*time.Second {
+		t.Fatalf("next PR sleep = %s", sleeps[2])
+	}
+	if len(submitter.actions) != 1 {
+		t.Fatalf("submitter actions = %#v", submitter.actions)
 	}
 }
 

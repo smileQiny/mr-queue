@@ -27,8 +27,10 @@ community:
 workflow:
   merge_method: "squash"
   review_comment: "已完成预审，确认合并。"
-  loop_delay_min: "1m"
-  loop_delay_max: "5m"
+  wait_check_delay_min: "10s"
+  wait_check_delay_max: "30s"
+  next_pr_delay_min: "1m"
+  next_pr_delay_max: "5m"
   stop_on_failure: true
 
 auth:

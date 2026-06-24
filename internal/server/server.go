@@ -19,6 +19,7 @@ type Server struct {
 	running bool
 	mode    string
 	lastErr string
+	lastMsg string
 	cancel  context.CancelFunc
 }
 
@@ -56,6 +57,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	running := s.running
 	mode := s.mode
 	lastErr := s.lastErr
+	lastMsg := s.lastMsg
 	s.mu.Unlock()
 	respondJSON(w, map[string]interface{}{
 		"state":   s.runtime.State.Snapshot(),
@@ -63,6 +65,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"running": running,
 		"mode":    mode,
 		"lastErr": lastErr,
+		"lastMsg": lastMsg,
 	})
 }
 
@@ -80,6 +83,7 @@ func (s *Server) syncQueue(w http.ResponseWriter, r *http.Request) {
 	s.running = true
 	s.mode = "sync"
 	s.lastErr = ""
+	s.lastMsg = ""
 	s.mu.Unlock()
 
 	go func() {
@@ -92,7 +96,7 @@ func (s *Server) syncQueue(w http.ResponseWriter, r *http.Request) {
 			s.lastErr = err.Error()
 			return
 		}
-		s.lastErr = fmt.Sprintf("synced %d queue commits", count)
+		s.lastMsg = fmt.Sprintf("synced %d queue commits", count)
 	}()
 	respondJSON(w, map[string]string{"status": "started"})
 }
@@ -111,6 +115,7 @@ func (s *Server) runOnce(w http.ResponseWriter, r *http.Request) {
 	s.running = true
 	s.mode = "once"
 	s.lastErr = ""
+	s.lastMsg = ""
 	s.mu.Unlock()
 
 	go func() {
@@ -142,6 +147,7 @@ func (s *Server) runLoop(w http.ResponseWriter, r *http.Request) {
 	s.running = true
 	s.mode = "loop"
 	s.lastErr = ""
+	s.lastMsg = ""
 	s.cancel = cancel
 	s.mu.Unlock()
 
@@ -159,7 +165,7 @@ func (s *Server) runLoop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
-		err := s.runtime.Runner.RunLoopWithOptions(ctx, options)
+		result, err := s.runtime.Runner.RunLoopWithOptions(ctx, options)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.running = false
@@ -167,33 +173,56 @@ func (s *Server) runLoop(w http.ResponseWriter, r *http.Request) {
 		s.cancel = nil
 		if err != nil && err != context.Canceled {
 			s.lastErr = err.Error()
+			return
+		}
+		if result.StopReason != "" {
+			s.lastMsg = "auto run stopped: " + result.StopReason
 		}
 	}()
 	respondJSON(w, map[string]string{"status": "started"})
 }
 
 func (s *Server) loopOptionsFromRequest(r *http.Request) (runner.LoopOptions, error) {
-	minDelay, maxDelay, err := s.runtime.Config.Workflow.LoopDelayRange()
+	waitMinDelay, waitMaxDelay, err := s.runtime.Config.Workflow.WaitCheckDelayRange()
 	if err != nil {
 		return runner.LoopOptions{}, err
 	}
-	if value := r.FormValue("loop_delay_min"); value != "" {
-		minDelay, err = time.ParseDuration(value)
+	nextMinDelay, nextMaxDelay, err := s.runtime.Config.Workflow.NextPRDelayRange()
+	if err != nil {
+		return runner.LoopOptions{}, err
+	}
+	if value := firstFormValue(r, "wait_check_delay_min", "loop_delay_min"); value != "" {
+		waitMinDelay, err = time.ParseDuration(value)
 		if err != nil {
-			return runner.LoopOptions{}, fmt.Errorf("parse loop_delay_min: %w", err)
+			return runner.LoopOptions{}, fmt.Errorf("parse wait_check_delay_min: %w", err)
 		}
 	}
-	if value := r.FormValue("loop_delay_max"); value != "" {
-		maxDelay, err = time.ParseDuration(value)
+	if value := firstFormValue(r, "wait_check_delay_max", "loop_delay_max"); value != "" {
+		waitMaxDelay, err = time.ParseDuration(value)
 		if err != nil {
-			return runner.LoopOptions{}, fmt.Errorf("parse loop_delay_max: %w", err)
+			return runner.LoopOptions{}, fmt.Errorf("parse wait_check_delay_max: %w", err)
 		}
 	}
-	if minDelay <= 0 || maxDelay <= 0 {
+	if value := r.FormValue("next_pr_delay_min"); value != "" {
+		nextMinDelay, err = time.ParseDuration(value)
+		if err != nil {
+			return runner.LoopOptions{}, fmt.Errorf("parse next_pr_delay_min: %w", err)
+		}
+	}
+	if value := r.FormValue("next_pr_delay_max"); value != "" {
+		nextMaxDelay, err = time.ParseDuration(value)
+		if err != nil {
+			return runner.LoopOptions{}, fmt.Errorf("parse next_pr_delay_max: %w", err)
+		}
+	}
+	if waitMinDelay <= 0 || waitMaxDelay <= 0 || nextMinDelay <= 0 || nextMaxDelay <= 0 {
 		return runner.LoopOptions{}, fmt.Errorf("loop delays must be positive")
 	}
-	if maxDelay < minDelay {
-		return runner.LoopOptions{}, fmt.Errorf("loop_delay_max must be >= loop_delay_min")
+	if waitMaxDelay < waitMinDelay {
+		return runner.LoopOptions{}, fmt.Errorf("wait_check_delay_max must be >= wait_check_delay_min")
+	}
+	if nextMaxDelay < nextMinDelay {
+		return runner.LoopOptions{}, fmt.Errorf("next_pr_delay_max must be >= next_pr_delay_min")
 	}
 	maxMergedCommits := 0
 	if value := r.FormValue("max_merged_commits"); value != "" {
@@ -207,12 +236,23 @@ func (s *Server) loopOptionsFromRequest(r *http.Request) (runner.LoopOptions, er
 		maxMergedCommits = parsed
 	}
 	return runner.LoopOptions{
-		MinDelay:         minDelay,
-		MaxDelay:         maxDelay,
-		MaxMergedCommits: maxMergedCommits,
-		WorkWindowStart:  r.FormValue("work_window_start"),
-		WorkWindowEnd:    r.FormValue("work_window_end"),
+		WaitCheckDelayMin: waitMinDelay,
+		WaitCheckDelayMax: waitMaxDelay,
+		NextPRDelayMin:    nextMinDelay,
+		NextPRDelayMax:    nextMaxDelay,
+		MaxMergedCommits:  maxMergedCommits,
+		WorkWindowStart:   r.FormValue("work_window_start"),
+		WorkWindowEnd:     r.FormValue("work_window_end"),
 	}, nil
+}
+
+func firstFormValue(r *http.Request, names ...string) string {
+	for _, name := range names {
+		if value := r.FormValue(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +312,7 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) refreshWaitingLoop() {
 	for {
-		minDelay, maxDelay, err := s.runtime.Config.Workflow.LoopDelayRange()
+		minDelay, maxDelay, err := s.runtime.Config.Workflow.WaitCheckDelayRange()
 		delay := minDelay
 		if err != nil {
 			delay = time.Minute

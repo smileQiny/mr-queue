@@ -68,10 +68,10 @@ const indexHTML = `<!doctype html>
 
     .loop-options {
       display: grid;
-      grid-template-columns: repeat(5, minmax(76px, 1fr));
+      grid-template-columns: repeat(7, minmax(76px, 1fr));
       gap: 8px;
       width: 100%;
-      max-width: 540px;
+      max-width: 760px;
     }
 
     .loop-options label {
@@ -267,8 +267,10 @@ const indexHTML = `<!doctype html>
     </div>
     <div class="actions">
       <div class="loop-options">
-        <label>最小间隔<input id="loopDelayMin" value="1m"></label>
-        <label>最大间隔<input id="loopDelayMax" value="5m"></label>
+        <label>检查最小<input id="waitCheckDelayMin" value="10s"></label>
+        <label>检查最大<input id="waitCheckDelayMax" value="30s"></label>
+        <label>下个最小<input id="nextPRDelayMin" value="1m"></label>
+        <label>下个最大<input id="nextPRDelayMax" value="5m"></label>
         <label>开始时间<input id="workStart" type="time" value="08:00"></label>
         <label>结束时间<input id="workEnd" type="time" value="23:30"></label>
         <label>合入上限<input id="maxMerged" type="number" min="0" step="1" value="3"></label>
@@ -313,8 +315,10 @@ const indexHTML = `<!doctype html>
 
     async function runLoop() {
       const params = new URLSearchParams({
-        loop_delay_min: document.getElementById('loopDelayMin').value,
-        loop_delay_max: document.getElementById('loopDelayMax').value,
+        wait_check_delay_min: document.getElementById('waitCheckDelayMin').value,
+        wait_check_delay_max: document.getElementById('waitCheckDelayMax').value,
+        next_pr_delay_min: document.getElementById('nextPRDelayMin').value,
+        next_pr_delay_max: document.getElementById('nextPRDelayMax').value,
         work_window_start: document.getElementById('workStart').value,
         work_window_end: document.getElementById('workEnd').value,
         max_merged_commits: document.getElementById('maxMerged').value
@@ -333,7 +337,7 @@ const indexHTML = `<!doctype html>
       document.getElementById('runBtn').disabled = data.running || data.state.paused;
       document.getElementById('loopBtn').disabled = data.running || data.state.paused;
       document.getElementById('stopBtn').disabled = !data.running;
-      for (const id of ['loopDelayMin', 'loopDelayMax', 'workStart', 'workEnd', 'maxMerged']) {
+      for (const id of ['waitCheckDelayMin', 'waitCheckDelayMax', 'nextPRDelayMin', 'nextPRDelayMax', 'workStart', 'workEnd', 'maxMerged']) {
         document.getElementById(id).disabled = data.running;
       }
       document.getElementById('pauseBtn').disabled = data.state.paused;
@@ -342,14 +346,16 @@ const indexHTML = `<!doctype html>
       applyLoopDefaults(data.config || {});
       renderQueue(tasks);
       renderConfig(data.config || {});
-      renderLogs(tasks, data.lastErr);
+      renderLogs(tasks, data.lastErr, data.lastMsg);
     }
 
     function applyLoopDefaults(config) {
       if (window.loopDefaultsApplied) return;
       const workflow = config.workflow || {};
-      document.getElementById('loopDelayMin').value = workflow.loop_delay_min || '1m';
-      document.getElementById('loopDelayMax').value = workflow.loop_delay_max || workflow.loop_delay_min || '5m';
+      document.getElementById('waitCheckDelayMin').value = workflow.wait_check_delay_min || '10s';
+      document.getElementById('waitCheckDelayMax').value = workflow.wait_check_delay_max || workflow.wait_check_delay_min || '30s';
+      document.getElementById('nextPRDelayMin').value = workflow.next_pr_delay_min || workflow.loop_delay_min || '1m';
+      document.getElementById('nextPRDelayMax').value = workflow.next_pr_delay_max || workflow.loop_delay_max || workflow.next_pr_delay_min || '5m';
       window.loopDefaultsApplied = true;
     }
 
@@ -392,7 +398,8 @@ const indexHTML = `<!doctype html>
         ['目标分支', config.community && config.community.branch],
         ['合并方式', config.workflow && config.workflow.merge_method],
         ['等待评论', config.workflow && config.workflow.required_comment_text],
-        ['自动间隔', loopDelayText(config.workflow)],
+        ['等待检查', waitCheckDelayText(config.workflow)],
+        ['下个 PR 间隔', nextPRDelayText(config.workflow)],
         ['本轮限制', '页面启动时设置'],
         ['提交账号', config.auth && config.auth.submitter && config.auth.submitter.token_env],
         ['审核账号', config.auth && config.auth.reviewer && config.auth.reviewer.token_env],
@@ -403,7 +410,7 @@ const indexHTML = `<!doctype html>
       ).join('');
     }
 
-    function renderLogs(tasks, lastErr) {
+    function renderLogs(tasks, lastErr, lastMsg) {
       const logs = [];
       for (const task of tasks) {
         for (const log of (task.logs || [])) {
@@ -413,6 +420,7 @@ const indexHTML = `<!doctype html>
       }
       logs.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
       if (lastErr) logs.unshift({ step: 'last error', message: lastErr, time: '' });
+      if (lastMsg) logs.unshift({ step: 'loop', message: lastMsg, time: '' });
       const el = document.getElementById('logs');
       if (!logs.length) {
         el.innerHTML = '<div class="empty">暂无日志</div>';
@@ -420,8 +428,29 @@ const indexHTML = `<!doctype html>
       }
       el.innerHTML = logs.slice(0, 12).map(log =>
         '<div class="log"><span class="log-step">' + escapeHTML(log.step) + '</span>' + escapeHTML(displayLogMessage(log)) +
-        '<div class="log-time">' + escapeHTML(log.time || '') + '</div></div>'
+        '<div class="log-time">' + escapeHTML(formatLogTime(log.time)) + '</div></div>'
       ).join('');
+    }
+
+    function formatLogTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+      }, {});
+      return parts.year + '-' + parts.month + '-' + parts.day + ' ' +
+        parts.hour + ':' + parts.minute + ':' + parts.second + ' UTC+08:00';
     }
 
     function shortSha(sha) { return (sha || '').slice(0, 12); }
@@ -452,9 +481,15 @@ const indexHTML = `<!doctype html>
       const prefix = privateConfig.branch_prefix || 'mr-queue';
       return (privateConfig.branch_template || '{prefix}-{sha12}').replaceAll('{prefix}', prefix);
     }
-    function loopDelayText(workflow) {
+    function waitCheckDelayText(workflow) {
       if (!workflow) return '-';
-      return (workflow.loop_delay_min || '-') + ' .. ' + (workflow.loop_delay_max || workflow.loop_delay_min || '-');
+      return (workflow.wait_check_delay_min || '-') + ' .. ' + (workflow.wait_check_delay_max || workflow.wait_check_delay_min || '-');
+    }
+    function nextPRDelayText(workflow) {
+      if (!workflow) return '-';
+      const min = workflow.next_pr_delay_min || workflow.loop_delay_min || '-';
+      const max = workflow.next_pr_delay_max || workflow.loop_delay_max || workflow.next_pr_delay_min || workflow.loop_delay_min || '-';
+      return min + ' .. ' + max;
     }
     function displayLogMessage(log) {
       const message = String(log.message || '');

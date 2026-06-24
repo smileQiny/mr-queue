@@ -41,12 +41,22 @@ type PullClient interface {
 }
 
 type LoopOptions struct {
-	MinDelay         time.Duration
-	MaxDelay         time.Duration
-	MaxMergedCommits int
-	WorkWindowStart  string
-	WorkWindowEnd    string
-	Now              func() time.Time
+	MinDelay          time.Duration
+	MaxDelay          time.Duration
+	WaitCheckDelayMin time.Duration
+	WaitCheckDelayMax time.Duration
+	NextPRDelayMin    time.Duration
+	NextPRDelayMax    time.Duration
+	MaxMergedCommits  int
+	WorkWindowStart   string
+	WorkWindowEnd     string
+	Now               func() time.Time
+	Sleep             func(context.Context, time.Duration) error
+}
+
+type LoopResult struct {
+	StopReason  string
+	MergedCount int
 }
 
 type Runner struct {
@@ -156,56 +166,142 @@ func (r *Runner) refreshRefs() error {
 }
 
 func (r *Runner) RunLoop(ctx context.Context, delay time.Duration) error {
-	return r.RunLoopRange(ctx, delay, delay)
+	_, err := r.RunLoopRange(ctx, delay, delay)
+	return err
 }
 
-func (r *Runner) RunLoopRange(ctx context.Context, minDelay time.Duration, maxDelay time.Duration) error {
-	return r.RunLoopWithOptions(ctx, LoopOptions{MinDelay: minDelay, MaxDelay: maxDelay})
+func (r *Runner) RunLoopRange(ctx context.Context, minDelay time.Duration, maxDelay time.Duration) (LoopResult, error) {
+	return r.RunLoopWithOptions(ctx, LoopOptions{
+		MinDelay:          minDelay,
+		MaxDelay:          maxDelay,
+		WaitCheckDelayMin: minDelay,
+		WaitCheckDelayMax: maxDelay,
+	})
 }
 
-func (r *Runner) RunLoopWithOptions(ctx context.Context, options LoopOptions) error {
-	minDelay := options.MinDelay
-	maxDelay := options.MaxDelay
-	if minDelay <= 0 {
-		minDelay = time.Second
+func (r *Runner) RunLoopWithOptions(ctx context.Context, options LoopOptions) (LoopResult, error) {
+	waitMinDelay, waitMaxDelay := normalizeDelayRange(options.WaitCheckDelayMin, options.WaitCheckDelayMax, time.Second, time.Second)
+	nextMinDelay := options.NextPRDelayMin
+	nextMaxDelay := options.NextPRDelayMax
+	if nextMinDelay <= 0 {
+		nextMinDelay = options.MinDelay
 	}
-	if maxDelay < minDelay {
-		maxDelay = minDelay
+	if nextMaxDelay <= 0 {
+		nextMaxDelay = options.MaxDelay
 	}
+	nextMinDelay, nextMaxDelay = normalizeDelayRange(nextMinDelay, nextMaxDelay, time.Second, time.Second)
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
+	sleep := options.Sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	eligibleForLimit := mergeLimitEligibleTasks(r.store.Snapshot())
 	mergedCount := 0
 	for {
 		before := r.store.Snapshot()
 		if before.Paused {
-			return nil
+			return LoopResult{StopReason: "queue paused", MergedCount: mergedCount}, nil
 		}
 		inWindow, err := inWorkWindow(now(), options.WorkWindowStart, options.WorkWindowEnd)
 		if err != nil {
-			return err
+			return LoopResult{MergedCount: mergedCount}, err
 		}
 		if !inWindow {
-			return nil
+			return LoopResult{StopReason: "outside work window", MergedCount: mergedCount}, nil
 		}
 		if err := r.RunOnce(); err != nil {
-			return err
+			return LoopResult{MergedCount: mergedCount}, err
 		}
 		after := r.store.Snapshot()
-		mergedCount += newlyMergedCount(before, after)
+		markNewMergeLimitEligibleTasks(before, after, eligibleForLimit)
+		mergedCount += newlyMergedEligibleCount(before, after, eligibleForLimit)
 		if options.MaxMergedCommits > 0 && mergedCount >= options.MaxMergedCommits {
-			return nil
+			return LoopResult{
+				StopReason:  fmt.Sprintf("reached max merged commits: %d/%d", mergedCount, options.MaxMergedCommits),
+				MergedCount: mergedCount,
+			}, nil
 		}
 		if sameSnapshotProgress(before, after) && !hasWaitingTask(after) {
-			return nil
+			return LoopResult{StopReason: "no pending or waiting tasks progressed", MergedCount: mergedCount}, nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(randomDelay(minDelay, maxDelay)):
+		delay := nextLoopDelay(before, after, waitMinDelay, waitMaxDelay, nextMinDelay, nextMaxDelay)
+		if err := sleep(ctx, delay); err != nil {
+			return LoopResult{StopReason: "stopped by user", MergedCount: mergedCount}, err
 		}
 	}
+}
+
+func normalizeDelayRange(minDelay time.Duration, maxDelay time.Duration, defaultMin time.Duration, defaultMax time.Duration) (time.Duration, time.Duration) {
+	if minDelay <= 0 {
+		minDelay = defaultMin
+	}
+	if maxDelay <= 0 {
+		maxDelay = defaultMax
+	}
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	return minDelay, maxDelay
+}
+
+func nextLoopDelay(before state.Snapshot, after state.Snapshot, waitMinDelay time.Duration, waitMaxDelay time.Duration, nextMinDelay time.Duration, nextMaxDelay time.Duration) time.Duration {
+	if newlyMergedCount(before, after) > 0 {
+		return randomDelay(nextMinDelay, nextMaxDelay)
+	}
+	if hasWaitingTask(after) {
+		return randomDelay(waitMinDelay, waitMaxDelay)
+	}
+	return randomDelay(nextMinDelay, nextMaxDelay)
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(delay):
+		return nil
+	}
+}
+
+func mergeLimitEligibleTasks(snapshot state.Snapshot) map[string]bool {
+	eligible := map[string]bool{}
+	for sha, task := range snapshot.Tasks {
+		if task.Status == "" || task.Status == state.StatusPending {
+			eligible[sha] = true
+		}
+	}
+	return eligible
+}
+
+func markNewMergeLimitEligibleTasks(before state.Snapshot, after state.Snapshot, eligible map[string]bool) {
+	for sha, afterTask := range after.Tasks {
+		if eligible[sha] {
+			continue
+		}
+		if _, ok := before.Tasks[sha]; ok {
+			continue
+		}
+		if afterTask.Status == "" || afterTask.Status == state.StatusPending {
+			eligible[sha] = true
+		}
+	}
+}
+
+func newlyMergedEligibleCount(before state.Snapshot, after state.Snapshot, eligible map[string]bool) int {
+	count := 0
+	for sha, afterTask := range after.Tasks {
+		if !eligible[sha] || afterTask.Status != state.StatusMerged {
+			continue
+		}
+		beforeTask, ok := before.Tasks[sha]
+		if !ok || beforeTask.Status != state.StatusMerged {
+			count++
+		}
+	}
+	return count
 }
 
 func inWorkWindow(now time.Time, start string, end string) (bool, error) {

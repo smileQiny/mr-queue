@@ -108,14 +108,19 @@ workflow:
     /lgtm
     /approve
   approve: false
-  loop_delay_min: "1m"
-  loop_delay_max: "5m"
+  wait_check_delay_min: "10s"
+  wait_check_delay_max: "30s"
+  next_pr_delay_min: "1m"
+  next_pr_delay_max: "5m"
 ```
 
-`loop_delay_min` and `loop_delay_max` control the random delay between automatic
-loop iterations. The web panel lets you override the delay, working time window,
-and maximum merged commits for each automatic run. The merged limit counts only
-commits that reach `merged` during that run.
+`wait_check_delay_min` and `wait_check_delay_max` control how often the tool
+checks waiting MRs for required comments or external merge completion.
+`next_pr_delay_min` and `next_pr_delay_max` control the random delay after a
+commit reaches `merged` before the next MR is created. The web panel lets you
+override both delay ranges, the working time window, and maximum merged commits
+for each automatic run. The merged limit counts only commits that reach `merged`
+during that run.
 
 ## Build
 

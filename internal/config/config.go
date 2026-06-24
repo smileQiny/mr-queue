@@ -72,6 +72,10 @@ type Workflow struct {
 	ApprovalFailureMode string `yaml:"approval_failure_mode" json:"approval_failure_mode"`
 	LoopDelayMin        string `yaml:"loop_delay_min" json:"loop_delay_min"`
 	LoopDelayMax        string `yaml:"loop_delay_max" json:"loop_delay_max"`
+	WaitCheckDelayMin   string `yaml:"wait_check_delay_min" json:"wait_check_delay_min"`
+	WaitCheckDelayMax   string `yaml:"wait_check_delay_max" json:"wait_check_delay_max"`
+	NextPRDelayMin      string `yaml:"next_pr_delay_min" json:"next_pr_delay_min"`
+	NextPRDelayMax      string `yaml:"next_pr_delay_max" json:"next_pr_delay_max"`
 	StopOnFailure       bool   `yaml:"stop_on_failure" json:"stop_on_failure"`
 }
 
@@ -88,29 +92,53 @@ func (w Workflow) UsesExternalMerge() bool {
 }
 
 func (w Workflow) LoopDelayRange() (time.Duration, time.Duration, error) {
-	minDelay := 1200 * time.Millisecond
-	maxDelay := minDelay
-	if w.LoopDelayMin != "" {
-		parsed, err := time.ParseDuration(w.LoopDelayMin)
+	return parseDelayRange(w.LoopDelayMin, w.LoopDelayMax, "1m", "5m", "workflow.loop_delay")
+}
+
+func (w Workflow) WaitCheckDelayRange() (time.Duration, time.Duration, error) {
+	return parseDelayRange(w.WaitCheckDelayMin, w.WaitCheckDelayMax, "10s", "30s", "workflow.wait_check_delay")
+}
+
+func (w Workflow) NextPRDelayRange() (time.Duration, time.Duration, error) {
+	minValue := w.NextPRDelayMin
+	maxValue := w.NextPRDelayMax
+	if minValue == "" && maxValue == "" {
+		minValue = w.LoopDelayMin
+		maxValue = w.LoopDelayMax
+	}
+	return parseDelayRange(minValue, maxValue, "1m", "5m", "workflow.next_pr_delay")
+}
+
+func parseDelayRange(minValue string, maxValue string, defaultMin string, defaultMax string, name string) (time.Duration, time.Duration, error) {
+	minDelay, err := time.ParseDuration(defaultMin)
+	if err != nil {
+		return 0, 0, err
+	}
+	maxDelay, err := time.ParseDuration(defaultMax)
+	if err != nil {
+		return 0, 0, err
+	}
+	if minValue != "" {
+		parsed, err := time.ParseDuration(minValue)
 		if err != nil {
-			return 0, 0, fmt.Errorf("parse workflow.loop_delay_min: %w", err)
+			return 0, 0, fmt.Errorf("parse %s_min: %w", name, err)
 		}
 		minDelay = parsed
 	}
-	if w.LoopDelayMax != "" {
-		parsed, err := time.ParseDuration(w.LoopDelayMax)
+	if maxValue != "" {
+		parsed, err := time.ParseDuration(maxValue)
 		if err != nil {
-			return 0, 0, fmt.Errorf("parse workflow.loop_delay_max: %w", err)
+			return 0, 0, fmt.Errorf("parse %s_max: %w", name, err)
 		}
 		maxDelay = parsed
-	} else {
+	} else if minValue != "" {
 		maxDelay = minDelay
 	}
 	if minDelay <= 0 || maxDelay <= 0 {
-		return 0, 0, fmt.Errorf("workflow loop delays must be positive")
+		return 0, 0, fmt.Errorf("%s delays must be positive", name)
 	}
 	if maxDelay < minDelay {
-		return 0, 0, fmt.Errorf("workflow.loop_delay_max must be >= workflow.loop_delay_min")
+		return 0, 0, fmt.Errorf("%s_max must be >= %s_min", name, name)
 	}
 	return minDelay, maxDelay, nil
 }
@@ -265,6 +293,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Workflow.LoopDelayMax == "" {
 		c.Workflow.LoopDelayMax = "5m"
+	}
+	if c.Workflow.WaitCheckDelayMin == "" {
+		c.Workflow.WaitCheckDelayMin = "10s"
+	}
+	if c.Workflow.WaitCheckDelayMax == "" {
+		c.Workflow.WaitCheckDelayMax = "30s"
+	}
+	if c.Workflow.NextPRDelayMin == "" {
+		c.Workflow.NextPRDelayMin = c.Workflow.LoopDelayMin
+	}
+	if c.Workflow.NextPRDelayMax == "" {
+		c.Workflow.NextPRDelayMax = c.Workflow.LoopDelayMax
 	}
 	if c.Workflow.CommitRange == "" && c.Queue.StartSHA != "" && c.Queue.EndSHA != "" {
 		c.Workflow.CommitRange = c.Queue.StartSHA + "^.." + c.Queue.EndSHA

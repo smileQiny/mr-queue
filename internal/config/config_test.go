@@ -132,19 +132,29 @@ GITCODE_MAINTAINER_TOKEN=merge-token
 	}
 }
 
-func TestWorkflowDefaultsLoopDelayRangeToOneToFiveMinutes(t *testing.T) {
+func TestWorkflowDefaultsSplitWaitAndNextPRDelayRanges(t *testing.T) {
 	cfg := Config{}
 	cfg.applyDefaults()
 
-	if cfg.Workflow.LoopDelayMin != "1m" || cfg.Workflow.LoopDelayMax != "5m" {
-		t.Fatalf("loop delay defaults = %q..%q", cfg.Workflow.LoopDelayMin, cfg.Workflow.LoopDelayMax)
+	if cfg.Workflow.WaitCheckDelayMin != "10s" || cfg.Workflow.WaitCheckDelayMax != "30s" {
+		t.Fatalf("wait check delay defaults = %q..%q", cfg.Workflow.WaitCheckDelayMin, cfg.Workflow.WaitCheckDelayMax)
 	}
-	minDelay, maxDelay, err := cfg.Workflow.LoopDelayRange()
+	if cfg.Workflow.NextPRDelayMin != "1m" || cfg.Workflow.NextPRDelayMax != "5m" {
+		t.Fatalf("next PR delay defaults = %q..%q", cfg.Workflow.NextPRDelayMin, cfg.Workflow.NextPRDelayMax)
+	}
+	minDelay, maxDelay, err := cfg.Workflow.WaitCheckDelayRange()
 	if err != nil {
-		t.Fatalf("LoopDelayRange returned error: %v", err)
+		t.Fatalf("WaitCheckDelayRange returned error: %v", err)
+	}
+	if minDelay != 10*time.Second || maxDelay != 30*time.Second {
+		t.Fatalf("parsed wait check delay defaults = %s..%s", minDelay, maxDelay)
+	}
+	minDelay, maxDelay, err = cfg.Workflow.NextPRDelayRange()
+	if err != nil {
+		t.Fatalf("NextPRDelayRange returned error: %v", err)
 	}
 	if minDelay != time.Minute || maxDelay != 5*time.Minute {
-		t.Fatalf("parsed loop delay defaults = %s..%s", minDelay, maxDelay)
+		t.Fatalf("parsed next PR delay defaults = %s..%s", minDelay, maxDelay)
 	}
 }
 
