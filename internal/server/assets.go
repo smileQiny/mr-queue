@@ -81,7 +81,7 @@ const indexHTML = `<!doctype html>
       font-size: 11px;
     }
 
-    input {
+    input, select {
       appearance: none;
       border: 1px solid var(--line);
       background: #fff;
@@ -92,6 +92,14 @@ const indexHTML = `<!doctype html>
       font: inherit;
       font-size: 13px;
       min-width: 0;
+    }
+
+    select {
+      padding-right: 26px;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
     }
 
     button {
@@ -154,8 +162,45 @@ const indexHTML = `<!doctype html>
       white-space: nowrap;
     }
 
+    .queue-panel {
+      height: min(760px, calc(100vh - 122px));
+      min-height: 520px;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .queue-head {
+      align-items: center;
+    }
+
+    .queue-tools {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .page-size {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .page-size select {
+      width: 76px;
+      min-height: 30px;
+      font-size: 12px;
+    }
+
     .queue {
       display: grid;
+      align-content: start;
+      min-height: 0;
+      overflow: auto;
     }
 
     .task {
@@ -168,6 +213,34 @@ const indexHTML = `<!doctype html>
     }
 
     .task:last-child { border-bottom: 0; }
+
+    .queue-footer {
+      min-height: 54px;
+      padding: 10px 18px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .page-info {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .pager {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .pager button {
+      min-width: 36px;
+      min-height: 32px;
+      padding: 0 10px;
+    }
 
     .sha {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -254,6 +327,9 @@ const indexHTML = `<!doctype html>
       .actions { justify-content: flex-start; }
       .loop-options { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: none; }
       main { grid-template-columns: 1fr; padding: 16px; }
+      .queue-panel { height: 620px; min-height: 520px; }
+      .queue-head, .queue-footer { align-items: flex-start; flex-direction: column; }
+      .queue-tools { justify-content: flex-start; }
       .task { grid-template-columns: 1fr; }
       .status { justify-self: start; }
     }
@@ -284,12 +360,31 @@ const indexHTML = `<!doctype html>
     </div>
   </header>
   <main>
-    <section>
-      <div class="section-head">
+    <section class="queue-panel">
+      <div class="section-head queue-head">
         <h2>Commit 队列</h2>
-        <div class="count" id="count">0 条</div>
+        <div class="queue-tools">
+          <label class="page-size">每页
+            <select id="pageSize" onchange="setPageSize(this.value)">
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <div class="count" id="count">0 条</div>
+        </div>
       </div>
       <div class="queue" id="queue"></div>
+      <div class="queue-footer">
+        <div class="page-info" id="pageInfo">第 1 / 1 页</div>
+        <div class="pager">
+          <button id="firstPageBtn" onclick="setQueuePage(1)" aria-label="第一页">«</button>
+          <button id="prevPageBtn" onclick="changeQueuePage(-1)" aria-label="上一页">‹</button>
+          <button id="nextPageBtn" onclick="changeQueuePage(1)" aria-label="下一页">›</button>
+          <button id="lastPageBtn" onclick="setQueuePage(queueTotalPages)" aria-label="最后一页">»</button>
+        </div>
+      </div>
     </section>
     <div class="side">
       <section>
@@ -303,6 +398,13 @@ const indexHTML = `<!doctype html>
     </div>
   </main>
   <script>
+    const pageSizeStorageKey = 'mrQueuePageSize';
+    const queuePager = {
+      page: 1,
+      pageSize: Number(localStorage.getItem(pageSizeStorageKey)) || 20
+    };
+    let queueTotalPages = 1;
+
     async function post(path) {
       await fetch(path, { method: 'POST' });
       await refresh();
@@ -332,6 +434,7 @@ const indexHTML = `<!doctype html>
       const data = await res.json();
       const tasks = Object.values(data.state.tasks || {}).sort(compareTasks);
       document.getElementById('count').textContent = tasks.length + ' 条';
+      document.getElementById('pageSize').value = String(queuePager.pageSize);
       document.getElementById('running').textContent = data.running ? 'running' : 'idle';
       document.getElementById('syncBtn').disabled = data.running || data.state.paused;
       document.getElementById('runBtn').disabled = data.running || data.state.paused;
@@ -349,6 +452,23 @@ const indexHTML = `<!doctype html>
       renderLogs(tasks, data.lastErr, data.lastMsg);
     }
 
+    function setPageSize(value) {
+      const parsed = Number(value);
+      queuePager.pageSize = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+      queuePager.page = 1;
+      localStorage.setItem(pageSizeStorageKey, String(queuePager.pageSize));
+      refresh();
+    }
+
+    function setQueuePage(page) {
+      queuePager.page = clampPage(page);
+      refresh();
+    }
+
+    function changeQueuePage(delta) {
+      setQueuePage(queuePager.page + delta);
+    }
+
     function applyLoopDefaults(config) {
       if (window.loopDefaultsApplied) return;
       const workflow = config.workflow || {};
@@ -361,11 +481,21 @@ const indexHTML = `<!doctype html>
 
     function renderQueue(tasks) {
       const el = document.getElementById('queue');
+      const footer = document.getElementById('pageInfo');
+      const total = tasks.length;
+      queueTotalPages = Math.max(1, Math.ceil(total / queuePager.pageSize));
+      queuePager.page = clampPage(queuePager.page);
+      const start = (queuePager.page - 1) * queuePager.pageSize;
+      const pageTasks = tasks.slice(start, start + queuePager.pageSize);
+      footer.textContent = total
+        ? '第 ' + queuePager.page + ' / ' + queueTotalPages + ' 页，显示 ' + (start + 1) + '-' + Math.min(start + queuePager.pageSize, total) + ' / ' + total
+        : '第 1 / 1 页';
+      updatePagerButtons();
       if (!tasks.length) {
         el.innerHTML = '<div class="empty">还没有任务。点击“同步队列”只加载 commit 列表；点击“运行下一条”会执行第一个待处理 MR。</div>';
         return;
       }
-      el.innerHTML = tasks.map(task => {
+      el.innerHTML = pageTasks.map(task => {
         const retryButton = task.status === 'failed'
           ? '<button onclick="retry(' + JSON.stringify(task.sha).replaceAll('"', '&quot;') + ')">重试</button>'
           : '';
@@ -383,6 +513,19 @@ const indexHTML = `<!doctype html>
           '<div><div class="status ' + escapeHTML(task.status || '') + '">' + escapeHTML(task.status || 'pending') + '</div><div style="margin-top:8px">' + retryButton + '</div></div>' +
           '</div>';
       }).join('');
+    }
+
+    function clampPage(page) {
+      const parsed = Number(page);
+      if (!Number.isFinite(parsed)) return 1;
+      return Math.min(Math.max(1, Math.trunc(parsed)), queueTotalPages);
+    }
+
+    function updatePagerButtons() {
+      document.getElementById('firstPageBtn').disabled = queuePager.page <= 1;
+      document.getElementById('prevPageBtn').disabled = queuePager.page <= 1;
+      document.getElementById('nextPageBtn').disabled = queuePager.page >= queueTotalPages;
+      document.getElementById('lastPageBtn').disabled = queuePager.page >= queueTotalPages;
     }
 
     function renderConfig(config) {

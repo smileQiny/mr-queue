@@ -1337,6 +1337,63 @@ func TestRunOnceSkipsEmptyCherryPickWithoutCreatingMR(t *testing.T) {
 	}
 }
 
+func TestRunOnceReplacesPreviousQueueRange(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTaskAt("oldabcdef123", "Old waiting task", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskMR("oldabcdef123", 99, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("oldabcdef123", state.StatusWaitingExternalMerge, ""); err != nil {
+		t.Fatal(err)
+	}
+	gitOps := &fakeGitOps{
+		commits: []Commit{
+			{SHA: "newabcdef123", Subject: "New range task"},
+		},
+	}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:   "new-start^..new-end",
+			MergeMethod:   "squash",
+			ReviewComment: "Reviewed.",
+		},
+	}, store, gitOps, &fakeClient{}, &fakeClient{}, &fakeClient{})
+
+	if err := r.RunOnce(); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	tasks := store.Snapshot().Tasks
+	if _, ok := tasks["oldabcdef123"]; ok {
+		t.Fatalf("old range task still exists: %#v", tasks["oldabcdef123"])
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d", len(tasks))
+	}
+	if tasks["newabcdef123"].QueueIndex != 0 {
+		t.Fatalf("new queue index = %d", tasks["newabcdef123"].QueueIndex)
+	}
+}
+
 func TestSyncQueueLoadsPendingTasksWithoutCreatingMRs(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

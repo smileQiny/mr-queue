@@ -103,10 +103,11 @@ func (r *Runner) RunOnce() error {
 	if err != nil {
 		return err
 	}
-	for i, commit := range commits {
-		if err := r.store.UpsertTaskAt(commit.SHA, commit.Subject, i); err != nil {
-			return err
-		}
+	queueTasks := queueTasksFromCommits(commits)
+	if err := r.store.ReplaceQueueTasks(queueTasks); err != nil {
+		return err
+	}
+	for _, commit := range commits {
 		task := r.store.Snapshot().Tasks[commit.SHA]
 		if task.Status == state.StatusMerged || task.Status == state.StatusSkipped {
 			continue
@@ -127,14 +128,19 @@ func (r *Runner) SyncQueue() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	queueTasks := make([]state.QueueTask, 0, len(commits))
-	for _, commit := range commits {
-		queueTasks = append(queueTasks, state.QueueTask{SHA: commit.SHA, Subject: commit.Subject})
-	}
+	queueTasks := queueTasksFromCommits(commits)
 	if err := r.store.ReplaceQueueTasks(queueTasks); err != nil {
 		return 0, err
 	}
 	return len(commits), nil
+}
+
+func queueTasksFromCommits(commits []Commit) []state.QueueTask {
+	queueTasks := make([]state.QueueTask, 0, len(commits))
+	for _, commit := range commits {
+		queueTasks = append(queueTasks, state.QueueTask{SHA: commit.SHA, Subject: commit.Subject})
+	}
+	return queueTasks
 }
 
 func (r *Runner) RefreshWaiting() error {

@@ -12,12 +12,20 @@ import (
 	"mr-queue/internal/server"
 )
 
+var (
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "version", "--version", "-version":
+		printVersion()
 	case "serve":
 		serve(os.Args[2:])
 	case "sync-queue":
@@ -99,8 +107,13 @@ func dryRun(args []string) {
 	fmt.Println(cfg.Safe())
 }
 
+func printVersion() {
+	fmt.Printf("mr-queue %s\ncommit: %s\nbuilt: %s\n", version, commit, buildDate)
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  mr-queue version")
 	fmt.Fprintln(os.Stderr, "  mr-queue serve --config mr-queue.yml [--env .env] [--addr 127.0.0.1:8787]")
 	fmt.Fprintln(os.Stderr, "  mr-queue sync-queue --config mr-queue.yml [--env .env] [--skip-fetch]")
 	fmt.Fprintln(os.Stderr, "  mr-queue run --config mr-queue.yml [--env .env]")

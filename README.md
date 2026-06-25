@@ -128,6 +128,53 @@ during that run.
 go build -o dist/mr-queue ./cmd/mr-queue
 ```
 
+Print version information:
+
+```bash
+go run ./cmd/mr-queue version
+```
+
+## Versioning And Releases
+
+The project version lives in `VERSION`. Release binaries receive version metadata
+through Go linker flags, so release builds report the tag, git commit, and build
+time:
+
+```bash
+mr-queue version
+```
+
+GitHub Releases are built by `.github/workflows/release.yml` whenever a `v*` tag
+is pushed. The workflow runs tests, builds Linux/macOS/Windows artifacts, writes
+`checksums.txt`, and creates the GitHub Release.
+
+Create a release:
+
+```bash
+version="$(cat VERSION)"
+git tag "v${version}"
+git push origin "v${version}"
+```
+
+Install from GitHub Releases on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TYY/mr-queue/main/scripts/install.sh | sh
+```
+
+If the GitHub repository owner/name is different, set `MR_QUEUE_REPO`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | \
+  MR_QUEUE_REPO=<owner>/<repo> sh
+```
+
+Install a specific version:
+
+```bash
+MR_QUEUE_VERSION=v0.1.0 MR_QUEUE_REPO=<owner>/<repo> sh scripts/install.sh
+```
+
 ## Same-Repository Test Loop
 
 For a closed-loop test in your own fork, point `community` to the same repository
