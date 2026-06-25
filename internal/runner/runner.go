@@ -28,6 +28,7 @@ type Commit struct {
 type GitOps interface {
 	RefreshRefs(remotes []string) error
 	ListCommits(commitRange string) ([]Commit, error)
+	IsCommitAlreadyApplied(commit Commit, baseRef string) (bool, error)
 	PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string) (string, error)
 }
 
@@ -280,6 +281,9 @@ func normalizeDelayRange(minDelay time.Duration, maxDelay time.Duration, default
 }
 
 func nextLoopDelay(before state.Snapshot, after state.Snapshot, waitMinDelay time.Duration, waitMaxDelay time.Duration, nextMinDelay time.Duration, nextMaxDelay time.Duration) time.Duration {
+	if newlySkippedCount(before, after) > 0 {
+		return 0
+	}
 	if newlyMergedCount(before, after) > 0 {
 		return randomDelay(nextMinDelay, nextMaxDelay)
 	}
@@ -388,6 +392,20 @@ func newlyMergedCount(before state.Snapshot, after state.Snapshot) int {
 	return count
 }
 
+func newlySkippedCount(before state.Snapshot, after state.Snapshot) int {
+	count := 0
+	for sha, afterTask := range after.Tasks {
+		if afterTask.Status != state.StatusSkipped {
+			continue
+		}
+		beforeTask, ok := before.Tasks[sha]
+		if !ok || beforeTask.Status != state.StatusSkipped {
+			count++
+		}
+	}
+	return count
+}
+
 func hasWaitingTask(snapshot state.Snapshot) bool {
 	for _, task := range snapshot.Tasks {
 		if task.Status == state.StatusWaitingRequiredComment || task.Status == state.StatusWaitingExternalMerge {
@@ -419,6 +437,22 @@ func (r *Runner) process(commit Commit) error {
 		branch := task.Branch
 		if branch == "" {
 			branch = r.branchName(commit)
+		}
+		if task.MRCommitSHA == "" {
+			applied, err := r.gitOps.IsCommitAlreadyApplied(commit, r.queueBaseRef())
+			if err != nil {
+				_ = r.fail(sha, err)
+				return err
+			}
+			if applied {
+				if err := r.store.SetTaskBranch(sha, branch); err != nil {
+					return err
+				}
+				if err := r.store.SetTaskStatus(sha, state.StatusSkipped, ""); err != nil {
+					return err
+				}
+				return r.store.AppendLog(sha, "skip", "Patch already exists on target base; skipped already-applied commit")
+			}
 			if err := r.store.SetTaskBranch(sha, branch); err != nil {
 				return err
 			}
@@ -714,6 +748,28 @@ func (g LocalGitOps) ListCommits(commitRange string) ([]Commit, error) {
 		})
 	}
 	return commits, nil
+}
+
+func (g LocalGitOps) IsCommitAlreadyApplied(commit Commit, baseRef string) (bool, error) {
+	countOut, err := g.git("rev-list", "--count", baseRef+".."+commit.SHA)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(countOut) == "0" {
+		return true, nil
+	}
+	cherryOut, err := g.git("cherry", baseRef, commit.SHA)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(cherryOut), "\n") {
+		line = strings.TrimSpace(line)
+		prefix, cherrySHA, ok := strings.Cut(line, " ")
+		if ok && prefix == "-" && strings.TrimSpace(cherrySHA) == commit.SHA {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string) (string, error) {

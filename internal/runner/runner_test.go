@@ -16,10 +16,12 @@ import (
 )
 
 type fakeGitOps struct {
-	refreshed []string
-	pushed    []string
-	commits   []Commit
-	pushErr   error
+	refreshed      []string
+	pushed         []string
+	appliedChecks  []string
+	commits        []Commit
+	alreadyApplied map[string]bool
+	pushErr        error
 }
 
 func (g *fakeGitOps) RefreshRefs(remotes []string) error {
@@ -44,6 +46,11 @@ func (g *fakeGitOps) PushSingleCommitBranch(commit Commit, branchName string, ba
 		return "", g.pushErr
 	}
 	return "mr-" + commit.SHA, nil
+}
+
+func (g *fakeGitOps) IsCommitAlreadyApplied(commit Commit, baseRef string) (bool, error) {
+	g.appliedChecks = append(g.appliedChecks, commit.SHA+":"+baseRef)
+	return g.alreadyApplied[commit.SHA], nil
 }
 
 type fakeClient struct {
@@ -1337,6 +1344,142 @@ func TestRunOnceSkipsEmptyCherryPickWithoutCreatingMR(t *testing.T) {
 	}
 }
 
+func TestRunOnceSkipsAlreadyAppliedCommitBeforePushing(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitter := &fakeClient{}
+	reviewer := &fakeClient{}
+	maintainer := &fakeClient{}
+	gitOps := &fakeGitOps{
+		alreadyApplied: map[string]bool{
+			"abcdef123456": true,
+		},
+	}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange: "47824259^..1660a7c4",
+			MergeMethod: "external",
+		},
+	}, store, gitOps, submitter, reviewer, maintainer)
+
+	if err := r.RunOnce(); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	task := store.Snapshot().Tasks["abcdef123456"]
+	if task.Status != state.StatusSkipped {
+		t.Fatalf("status = %q", task.Status)
+	}
+	if len(gitOps.appliedChecks) != 1 || gitOps.appliedChecks[0] != "abcdef123456:community/master" {
+		t.Fatalf("applied checks = %#v", gitOps.appliedChecks)
+	}
+	if len(gitOps.pushed) != 0 {
+		t.Fatalf("unexpected push: %#v", gitOps.pushed)
+	}
+	if task.MRNumber != 0 {
+		t.Fatalf("mr number = %d", task.MRNumber)
+	}
+	if len(submitter.actions) != 0 || len(reviewer.actions) != 0 || len(maintainer.actions) != 0 {
+		t.Fatalf("unexpected API actions: submitter=%#v reviewer=%#v maintainer=%#v", submitter.actions, reviewer.actions, maintainer.actions)
+	}
+	foundLog := false
+	for _, log := range task.Logs {
+		if log.Step == "skip" && strings.Contains(log.Message, "Patch already exists on target base") {
+			foundLog = true
+		}
+	}
+	if !foundLog {
+		t.Fatalf("missing skip log: %#v", task.Logs)
+	}
+}
+
+func TestRunLoopDoesNotDelayAfterPrecheckedAlreadyAppliedCommit(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitOps := &fakeGitOps{
+		commits: []Commit{
+			{SHA: "already123456", Subject: "Already merged"},
+			{SHA: "newcommit1234", Subject: "New change"},
+		},
+		alreadyApplied: map[string]bool{
+			"already123456": true,
+		},
+	}
+	submitter := &fakeClient{nextNumber: 11}
+	r := New(config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "community/master",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "community",
+			Owner:  "openeuler",
+			Repo:   "syskits",
+			Branch: "master",
+		},
+		Workflow: config.Workflow{
+			CommitRange:   "main..HEAD",
+			MergeMethod:   "squash",
+			ReviewComment: "Reviewed.",
+		},
+	}, store, gitOps, submitter, &fakeClient{}, &fakeClient{})
+
+	var sleeps []time.Duration
+	result, err := r.RunLoopWithOptions(context.Background(), LoopOptions{
+		WaitCheckDelayMin: time.Second,
+		WaitCheckDelayMax: time.Second,
+		NextPRDelayMin:    5 * time.Minute,
+		NextPRDelayMax:    5 * time.Minute,
+		MaxMergedCommits:  1,
+		Sleep: func(ctx context.Context, delay time.Duration) error {
+			sleeps = append(sleeps, delay)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunLoopWithOptions returned error: %v", err)
+	}
+
+	if result.MergedCount != 1 {
+		t.Fatalf("merged count = %d", result.MergedCount)
+	}
+	if len(sleeps) != 1 || sleeps[0] != 0 {
+		t.Fatalf("sleeps = %#v", sleeps)
+	}
+	tasks := store.Snapshot().Tasks
+	if tasks["already123456"].Status != state.StatusSkipped {
+		t.Fatalf("already status = %q", tasks["already123456"].Status)
+	}
+	if tasks["newcommit1234"].Status != state.StatusMerged {
+		t.Fatalf("new status = %q", tasks["newcommit1234"].Status)
+	}
+	if len(submitter.actions) != 1 {
+		t.Fatalf("submitter actions = %#v", submitter.actions)
+	}
+}
+
 func TestRunOnceReplacesPreviousQueueRange(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -1640,6 +1783,77 @@ func TestLocalGitOpsPushSingleCommitBranchReturnsEmptyCherryPick(t *testing.T) {
 	_, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(Commit{SHA: featureSHA}, "mr-empty", "base", "origin")
 	if !errors.Is(err, ErrEmptyCherryPick) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLocalGitOpsDetectsEquivalentPatchOnBaseRef(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	writeRepoFile(t, dir, "feature.txt", "base\n")
+	runGit(t, dir, "add", "feature.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	base := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "queue", base)
+	writeRepoFile(t, dir, "feature.txt", "feature\n")
+	runGit(t, dir, "add", "feature.txt")
+	runGit(t, dir, "commit", "-m", "queue change")
+	queueCommit := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "target", base)
+	writeRepoFile(t, dir, "feature.txt", "feature\n")
+	runGit(t, dir, "add", "feature.txt")
+	runGit(t, dir, "commit", "-m", "equivalent target change")
+	targetCommit := gitOutput(t, dir, "rev-parse", "HEAD")
+	if queueCommit == targetCommit {
+		t.Fatal("expected different commit ids")
+	}
+
+	applied, err := LocalGitOps{Dir: dir}.IsCommitAlreadyApplied(Commit{SHA: queueCommit}, "target")
+	if err != nil {
+		t.Fatalf("IsCommitAlreadyApplied returned error: %v", err)
+	}
+	if !applied {
+		t.Fatal("expected equivalent patch to be detected")
+	}
+}
+
+func TestLocalGitOpsDoesNotTreatCurrentCommitAsAppliedWhenOnlyAncestorPatchMatches(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	writeRepoFile(t, dir, "base.txt", "base\n")
+	runGit(t, dir, "add", "base.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	base := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "queue", base)
+	writeRepoFile(t, dir, "one.txt", "one\n")
+	runGit(t, dir, "add", "one.txt")
+	runGit(t, dir, "commit", "-m", "queue one")
+	writeRepoFile(t, dir, "two.txt", "two\n")
+	runGit(t, dir, "add", "two.txt")
+	runGit(t, dir, "commit", "-m", "queue two")
+	secondQueueCommit := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "target", base)
+	writeRepoFile(t, dir, "one.txt", "one\n")
+	runGit(t, dir, "add", "one.txt")
+	runGit(t, dir, "commit", "-m", "equivalent one")
+
+	applied, err := LocalGitOps{Dir: dir}.IsCommitAlreadyApplied(Commit{SHA: secondQueueCommit}, "target")
+	if err != nil {
+		t.Fatalf("IsCommitAlreadyApplied returned error: %v", err)
+	}
+	if applied {
+		t.Fatal("second queue commit was incorrectly treated as applied")
 	}
 }
 

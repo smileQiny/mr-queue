@@ -197,6 +197,7 @@ Click `同步队列` in the web panel first. That only loads commit metadata int
 state file. `运行下一条` and `自动运行` are the actions that push per-commit
 branches, create MRs, review, and merge.
 
-If a commit's patch already exists on the target base branch, Git reports an
-empty cherry-pick. The task is marked `skipped` and the loop continues with the
-next commit.
+Before pushing an MR branch, `mr-queue` checks whether the exact commit patch is
+already present on the target base branch. If it is already present, or if Git
+reports an empty cherry-pick, the task is marked `skipped` and automatic runs
+continue to the next commit without waiting for the next-PR delay.
