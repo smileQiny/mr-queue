@@ -148,31 +148,96 @@ GitHub Releases are built by `.github/workflows/release.yml` whenever a `v*` tag
 is pushed. The workflow runs tests, builds Linux/macOS/Windows artifacts, writes
 `checksums.txt`, and creates the GitHub Release.
 
-Create a release:
+Create and publish a GitHub release:
 
 ```bash
 version="$(cat VERSION)"
 git tag "v${version}"
-git push origin "v${version}"
+git push github main
+git push github "v${version}"
 ```
 
-Install from GitHub Releases on Linux or macOS:
+## Install From GitHub
+
+Install the latest GitHub Release on Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TYY/mr-queue/main/scripts/install.sh | sh
-```
-
-If the GitHub repository owner/name is different, set `MR_QUEUE_REPO`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | \
-  MR_QUEUE_REPO=<owner>/<repo> sh
+curl -fsSL https://raw.githubusercontent.com/smileQiny/mr-queue/main/scripts/install.sh | sh
 ```
 
 Install a specific version:
 
 ```bash
-MR_QUEUE_VERSION=v0.1.0 MR_QUEUE_REPO=<owner>/<repo> sh scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/smileQiny/mr-queue/main/scripts/install.sh | \
+  MR_QUEUE_VERSION=v0.1.1 sh
+```
+
+Install to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smileQiny/mr-queue/main/scripts/install.sh | \
+  INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+Download a release artifact manually:
+
+```bash
+version="v0.1.1"
+os="darwin"   # linux or darwin
+arch="arm64"  # amd64 or arm64
+curl -LO "https://github.com/smileQiny/mr-queue/releases/download/${version}/mr-queue_${os}_${arch}.tar.gz"
+tar -xzf "mr-queue_${os}_${arch}.tar.gz"
+sudo install -m 0755 "mr-queue_${os}_${arch}/mr-queue" /usr/local/bin/mr-queue
+mr-queue version
+```
+
+Deploy the local web panel:
+
+```bash
+mkdir -p "$HOME/mr-queue"
+cd "$HOME/mr-queue"
+cp /path/to/mr-queue.yml .
+cp /path/to/.env .
+mr-queue serve --config mr-queue.yml --env .env --addr 127.0.0.1:8787
+```
+
+Run it in the background on macOS with `launchctl`:
+
+```bash
+home_dir="$HOME"
+cat > "$HOME/Library/LaunchAgents/com.mr-queue.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.mr-queue</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/mr-queue</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>${home_dir}/mr-queue/mr-queue.yml</string>
+    <string>--env</string>
+    <string>${home_dir}/mr-queue/.env</string>
+    <string>--addr</string>
+    <string>127.0.0.1:8787</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/mr-queue.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mr-queue.err.log</string>
+</dict>
+</plist>
+PLIST
+
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.mr-queue.plist"
+launchctl kickstart -k "gui/$(id -u)/com.mr-queue"
+```
+
+Stop the macOS background service:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.mr-queue.plist"
 ```
 
 ## Same-Repository Test Loop

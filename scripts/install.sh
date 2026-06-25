@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${MR_QUEUE_REPO:-TYY/mr-queue}"
+repo="${MR_QUEUE_REPO:-smileQiny/mr-queue}"
 version="${MR_QUEUE_VERSION:-latest}"
 install_dir="${INSTALL_DIR:-/usr/local/bin}"
 
