@@ -169,7 +169,7 @@ Install a specific version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/smileQiny/mr-queue/main/scripts/install.sh | \
-  MR_QUEUE_VERSION=v0.1.1 sh
+  MR_QUEUE_VERSION=v0.1.2 sh
 ```
 
 Install to a custom directory:
@@ -182,7 +182,7 @@ curl -fsSL https://raw.githubusercontent.com/smileQiny/mr-queue/main/scripts/ins
 Download a release artifact manually:
 
 ```bash
-version="v0.1.1"
+version="v0.1.2"
 os="darwin"   # linux or darwin
 arch="arm64"  # amd64 or arm64
 curl -LO "https://github.com/smileQiny/mr-queue/releases/download/${version}/mr-queue_${os}_${arch}.tar.gz"
