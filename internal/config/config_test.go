@@ -148,6 +148,36 @@ func TestSafeRedactsRemoteURLCredentials(t *testing.T) {
 	}
 }
 
+func TestLoadSafeJSONResolvesTokenEnvironment(t *testing.T) {
+	t.Setenv("GITCODE_SUBMITTER_TOKEN", "submit-token")
+	t.Setenv("GITCODE_REVIEWER_TOKEN", "review-token")
+	cfg := Config{
+		Provider: "gitcode",
+		Local:    Local{Path: "/repo"},
+		Source:   Source{Repo: "gitcode.com/source/project", Branch: "feature-a"},
+		Target:   Target{Repo: "gitcode.com/target/project", Branch: "master"},
+		Auth: Auth{
+			Submitter: Credential{TokenEnv: "GITCODE_SUBMITTER_TOKEN", Token: "old-submit-token"},
+			Reviewer:  Credential{TokenEnv: "GITCODE_REVIEWER_TOKEN", Token: "old-review-token"},
+		},
+	}
+
+	restored, err := LoadSafeJSON([]byte(cfg.Safe()))
+	if err != nil {
+		t.Fatalf("LoadSafeJSON returned error: %v", err)
+	}
+
+	if restored.Auth.Submitter.Token != "submit-token" {
+		t.Fatalf("submitter token = %q", restored.Auth.Submitter.Token)
+	}
+	if restored.Auth.Reviewer.Token != "review-token" {
+		t.Fatalf("reviewer token = %q", restored.Auth.Reviewer.Token)
+	}
+	if restored.Workflow.CommitRange != "mrq-gitcode-com-target-project/master..mrq-gitcode-com-source-project/feature-a" {
+		t.Fatalf("commit range = %q", restored.Workflow.CommitRange)
+	}
+}
+
 func TestLoadSimpleModeDerivesLegacyQueuePrivateCommunity(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "mr-queue.yml")

@@ -40,7 +40,35 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 	if maintainerToken == "" && !cfg.Workflow.UsesExternalMerge() {
 		return nil, fmt.Errorf("maintainer token is required unless workflow.merge_method is external")
 	}
-	r := runner.New(
+	r := newRunner(cfg, store, submitter, reviewerToken, maintainerToken)
+	return &Runtime{Config: &cfg, State: store, Runner: r}, nil
+}
+
+func (r *Runtime) RebindConfig(cfg config.Config) error {
+	reviewerToken := cfg.Auth.Reviewer.Token
+	if reviewerToken == "" {
+		reviewerToken = cfg.Auth.Maintainer.Token
+	}
+	maintainerToken := cfg.Auth.Maintainer.Token
+	if reviewerToken == "" {
+		return fmt.Errorf("reviewer token is required")
+	}
+	if maintainerToken == "" && !cfg.Workflow.UsesExternalMerge() {
+		return fmt.Errorf("maintainer token is required unless workflow.merge_method is external")
+	}
+	r.Config = &cfg
+	r.Runner = newRunner(
+		cfg,
+		r.State,
+		gitcode.NewClientForProvider(cfg.Provider, cfg.Auth.Submitter.Token),
+		reviewerToken,
+		maintainerToken,
+	)
+	return nil
+}
+
+func newRunner(cfg config.Config, store *state.Store, submitter runner.PullClient, reviewerToken string, maintainerToken string) *runner.Runner {
+	return runner.New(
 		cfg,
 		store,
 		runner.LocalGitOps{
@@ -53,7 +81,6 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 		gitcode.NewClientForProvider(cfg.Provider, reviewerToken),
 		gitcode.NewClientForProvider(cfg.Provider, maintainerToken),
 	)
-	return &Runtime{Config: &cfg, State: store, Runner: r}, nil
 }
 
 func managedRemotes(cfg config.Config) map[string]string {

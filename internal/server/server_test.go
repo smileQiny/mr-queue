@@ -124,6 +124,61 @@ func TestDoctorAPIRunsDoctorAndReturnsReport(t *testing.T) {
 	}
 }
 
+func TestSelectScopeAPISwitchesActiveTasks(t *testing.T) {
+	t.Setenv("GITCODE_SUBMITTER_TOKEN", "submit-token")
+	t.Setenv("GITCODE_REVIEWER_TOKEN", "review-token")
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := config.Config{
+		Provider: "atomgit",
+		Source:   config.Source{Repo: "atomgit.com/source/project", Branch: "feature-a"},
+		Target:   config.Target{Repo: "atomgit.com/target/project", Branch: "master"},
+		Workflow: config.Workflow{CommitRange: "target/master..source/feature-a", MergeMethod: "external"},
+		Private:  config.Private{RemoteURL: "https://atomgit.com/source/project.git", BranchPrefix: "feat", BranchTemplate: "{prefix}-{sha12}"},
+		Auth: config.Auth{
+			Submitter: config.Credential{TokenEnv: "GITCODE_SUBMITTER_TOKEN"},
+			Reviewer:  config.Credential{TokenEnv: "GITCODE_REVIEWER_TOKEN"},
+		},
+	}
+	second := first
+	second.Source.Branch = "feature-b"
+	second.Workflow.CommitRange = "target/master..source/feature-b"
+	if err := store.ReplaceQueueTasksForConfig(first, []state.QueueTask{{SHA: "aaa111", Subject: "First"}}); err != nil {
+		t.Fatal(err)
+	}
+	firstScope := store.Snapshot().ActiveScopeID
+	if err := store.ReplaceQueueTasksForConfig(second, []state.QueueTask{{SHA: "bbb222", Subject: "Second"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{runtime: &app.Runtime{Config: &config.Config{}, State: store}}
+	req := httptest.NewRequest("POST", "/api/select-scope?scope_id="+firstScope, nil)
+	w := httptest.NewRecorder()
+
+	s.selectScope(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	snapshot := store.Snapshot()
+	if snapshot.ActiveScopeID != firstScope {
+		t.Fatalf("active scope = %q, want %q", snapshot.ActiveScopeID, firstScope)
+	}
+	if _, ok := snapshot.Tasks["aaa111"]; !ok {
+		t.Fatalf("first scope task missing: %#v", snapshot.Tasks)
+	}
+	if _, ok := snapshot.Tasks["bbb222"]; ok {
+		t.Fatalf("second scope task still active: %#v", snapshot.Tasks)
+	}
+	if s.runtime.Config.Source.Branch != "feature-a" {
+		t.Fatalf("runtime source branch = %q, want feature-a", s.runtime.Config.Source.Branch)
+	}
+	if s.runtime.Runner == nil {
+		t.Fatal("runtime runner was not rebound for selected scope")
+	}
+}
+
 type fakeDoctorRunner struct {
 	report doctor.Report
 }

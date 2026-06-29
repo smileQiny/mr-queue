@@ -204,6 +204,21 @@ func Load(configPath string, envPath string) (Config, error) {
 	return cfg, nil
 }
 
+func LoadSafeJSON(body []byte) (Config, error) {
+	var cfg Config
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse stored config: %w", err)
+	}
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.resolveTokens(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 func (c Config) Safe() string {
 	safe := c
 	safe.Auth.Submitter.Token = ""
