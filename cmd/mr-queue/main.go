@@ -126,7 +126,7 @@ func doctorCmd(args []string) {
 		cfg,
 		doctor.Options{Fix: *fix},
 		doctor.LocalGitChecker{Dir: cfg.Local.Path, Username: cfg.Private.HeadNamespace, AccessToken: cfg.Auth.Submitter.Token},
-		gitcode.NewClient(reviewerTokenFor(cfg)),
+		gitcode.NewClientForProvider(cfg.Provider, reviewerTokenFor(cfg)),
 	)
 	printDoctorReport(report)
 	if !report.OK {

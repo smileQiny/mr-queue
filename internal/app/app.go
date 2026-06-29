@@ -28,7 +28,7 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 	if err != nil {
 		return nil, err
 	}
-	submitter := gitcode.NewClient(cfg.Auth.Submitter.Token)
+	submitter := gitcode.NewClientForProvider(cfg.Provider, cfg.Auth.Submitter.Token)
 	reviewerToken := cfg.Auth.Reviewer.Token
 	if reviewerToken == "" {
 		reviewerToken = cfg.Auth.Maintainer.Token
@@ -50,8 +50,8 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 			ManagedRemotes: managedRemotes(cfg),
 		},
 		submitter,
-		gitcode.NewClient(reviewerToken),
-		gitcode.NewClient(maintainerToken),
+		gitcode.NewClientForProvider(cfg.Provider, reviewerToken),
+		gitcode.NewClientForProvider(cfg.Provider, maintainerToken),
 	)
 	return &Runtime{Config: &cfg, State: store, Runner: r}, nil
 }

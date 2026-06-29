@@ -1,9 +1,10 @@
-provider: gitcode
+provider: gitcode # or atomgit
 workspace: "/path/to/local/repo"
 
 source:
   # Commits are read from this repository branch. MR branches are pushed back
   # to the same repository.
+  # Use atomgit.com/... full paths with provider: atomgit.
   repo: "gitcode.com/your_namespace/project"
   branch: "queue"
   # Optional precise range. If omitted, mr-queue uses target..source.

@@ -299,6 +299,59 @@ auth:
 	}
 }
 
+func TestLoadSimpleModeSupportsAtomGitRepositoryFullPaths(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: atomgit
+workspace: "/Users/qiny/codespace/track-system"
+source:
+  repo: "atomgit.com/w-xxxx/track-system"
+  branch: "w-xxxx/track-system-1.2.0"
+target:
+  repo: "atomgit.com/openeuler/track-system"
+  branch: "master"
+workflow:
+  merge_method: "external"
+auth:
+  submitter:
+    token_env: "ATOMGIT_SUBMITTER_TOKEN"
+  reviewer:
+    token_env: "ATOMGIT_REVIEWER_TOKEN"
+`)
+	writeFile(t, envPath, `
+ATOMGIT_SUBMITTER_TOKEN=sub-token
+ATOMGIT_REVIEWER_TOKEN=review-token
+`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Provider != "atomgit" {
+		t.Fatalf("provider = %q", cfg.Provider)
+	}
+	if cfg.Queue.Remote != "mrq-atomgit-com-w-xxxx-track-system" {
+		t.Fatalf("queue remote = %q", cfg.Queue.Remote)
+	}
+	if cfg.Queue.RemoteURL != "https://atomgit.com/w-xxxx/track-system.git" {
+		t.Fatalf("queue remote url = %q", cfg.Queue.RemoteURL)
+	}
+	if cfg.Community.Remote != "mrq-atomgit-com-openeuler-track-system" {
+		t.Fatalf("community remote = %q", cfg.Community.Remote)
+	}
+	if cfg.Community.RemoteURL != "https://atomgit.com/openeuler/track-system.git" {
+		t.Fatalf("community remote url = %q", cfg.Community.RemoteURL)
+	}
+	wantRange := "mrq-atomgit-com-openeuler-track-system/master..mrq-atomgit-com-w-xxxx-track-system/w-xxxx/track-system-1.2.0"
+	if cfg.Workflow.CommitRange != wantRange {
+		t.Fatalf("commit range = %q, want %q", cfg.Workflow.CommitRange, wantRange)
+	}
+}
+
 func TestLoadSimpleModeRejectsUnsupportedRepositoryHost(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "mr-queue.yml")

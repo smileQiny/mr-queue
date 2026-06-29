@@ -75,6 +75,15 @@ func NewClient(token string) *Client {
 	}
 }
 
+func NewClientForProvider(provider string, token string) *Client {
+	client := NewClient(token)
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "atomgit":
+		client.BaseURL = "https://api.atomgit.com/api/v5"
+	}
+	return client
+}
+
 func (c *Client) CreatePull(owner string, repo string, input PullRequestInput) (PullRequest, error) {
 	var out PullRequest
 	err := c.request(http.MethodPost, pathFor(owner, repo, "pulls"), input, &out)
@@ -140,6 +149,7 @@ func (c *Client) request(method string, path string, payload interface{}, out in
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("private-token", c.token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

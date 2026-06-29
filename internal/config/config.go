@@ -346,6 +346,8 @@ func inferProvider(values ...string) string {
 		switch strings.ToLower(repo.Host) {
 		case "gitcode.com":
 			return "gitcode"
+		case "atomgit.com":
+			return "atomgit"
 		}
 	}
 	return ""
@@ -355,6 +357,8 @@ func hostForProvider(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "gitcode":
 		return "gitcode.com"
+	case "atomgit":
+		return "atomgit.com"
 	default:
 		return ""
 	}
@@ -577,7 +581,10 @@ func validateRepoHost(provider string, name string, value string) error {
 	if strings.EqualFold(repo.Host, "gitcode.com") {
 		return nil
 	}
-	return fmt.Errorf("%s uses unsupported repository host %s; only gitcode.com is supported", name, repo.Host)
+	if strings.EqualFold(repo.Host, "atomgit.com") {
+		return nil
+	}
+	return fmt.Errorf("%s uses unsupported repository host %s; only gitcode.com and atomgit.com are supported", name, repo.Host)
 }
 
 func (c *Config) resolveTokens() error {

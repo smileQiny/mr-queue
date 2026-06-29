@@ -1,7 +1,7 @@
 # mr-queue
 
 `mr-queue` is a Go CLI with a local web panel for serial merge request queue automation.
-The first provider adapter targets GitCode.
+The first provider adapter targets the GitCode/AtomGit service.
 
 Use a source repository branch as the queue of prepared commits. `mr-queue`
 processes one commit at a time:
@@ -145,9 +145,14 @@ target:
   branch: "master"
 ```
 
+For AtomGit repositories, use `provider: atomgit` and `atomgit.com/...` full
+paths. GitCode and AtomGit share the same service family, so the same token
+environment variables can be reused when the account has access.
+
 `source.repo` is where queue commits are read from and where generated MR
 branches are pushed. `target.repo` is where MRs are created. Use repository full
-paths including the host, for example `gitcode.com/owner/repo`.
+paths including the host, for example `gitcode.com/owner/repo` or
+`atomgit.com/owner/repo`.
 
 If you want a fixed commit range instead of `target..source`, configure one of
 these under `source`:

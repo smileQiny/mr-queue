@@ -17,12 +17,14 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestCreatePullUsesGitCodeV5EndpointAndTokenParam(t *testing.T) {
 	var seenPath string
 	var seenToken string
+	var seenPrivateToken string
 	var payload PullRequestInput
 	client := NewClient("token-1")
 	client.BaseURL = "https://example.test/api/v5"
 	client.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		seenPath = req.URL.Path
 		seenToken = req.URL.Query().Get("access_token")
+		seenPrivateToken = req.Header.Get("private-token")
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
@@ -45,11 +47,21 @@ func TestCreatePullUsesGitCodeV5EndpointAndTokenParam(t *testing.T) {
 	if seenToken != "token-1" {
 		t.Fatalf("token = %q", seenToken)
 	}
+	if seenPrivateToken != "token-1" {
+		t.Fatalf("private-token = %q", seenPrivateToken)
+	}
 	if payload.Head != "submitter:mr-queue-abc123" {
 		t.Fatalf("head = %q", payload.Head)
 	}
 	if pr.Number != 42 {
 		t.Fatalf("number = %d", pr.Number)
+	}
+}
+
+func TestNewClientForProviderUsesAtomGitBaseURL(t *testing.T) {
+	client := NewClientForProvider("atomgit", "token-atom")
+	if client.BaseURL != "https://api.atomgit.com/api/v5" {
+		t.Fatalf("base url = %q", client.BaseURL)
 	}
 }
 

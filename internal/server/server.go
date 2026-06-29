@@ -122,7 +122,7 @@ func (r runtimeDoctorRunner) Run(fix bool) doctor.Report {
 		cfg,
 		doctor.Options{Fix: fix},
 		doctor.LocalGitChecker{Dir: cfg.Local.Path, Username: cfg.Private.HeadNamespace, AccessToken: cfg.Auth.Submitter.Token},
-		gitcode.NewClient(reviewerTokenForDoctor(cfg)),
+		gitcode.NewClientForProvider(cfg.Provider, reviewerTokenForDoctor(cfg)),
 	)
 }
 
