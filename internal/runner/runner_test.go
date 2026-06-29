@@ -1550,7 +1550,16 @@ func TestSyncQueueLoadsPendingTasksWithoutCreatingMRs(t *testing.T) {
 		{SHA: "abcdef123456", Subject: "Add feature"},
 		{SHA: "123456abcdef", Subject: "Fix bug"},
 	}
-	r := New(config.Config{
+	cfg := config.Config{
+		Provider: "atomgit",
+		Source: config.Source{
+			Repo:   "atomgit.com/w-xxxx/track-system",
+			Branch: "new-features",
+		},
+		Target: config.Target{
+			Repo:   "atomgit.com/openeuler/syskits",
+			Branch: "master",
+		},
 		Queue: config.Queue{
 			Remote:  "private",
 			Branch:  "new-features",
@@ -1570,7 +1579,8 @@ func TestSyncQueueLoadsPendingTasksWithoutCreatingMRs(t *testing.T) {
 		Workflow: config.Workflow{
 			CommitRange: "47824259^..1660a7c4",
 		},
-	}, store, gitOps, submitter, reviewer, maintainer)
+	}
+	r := New(cfg, store, gitOps, submitter, reviewer, maintainer)
 
 	count, err := r.SyncQueue()
 	if err != nil {
@@ -1597,6 +1607,27 @@ func TestSyncQueueLoadsPendingTasksWithoutCreatingMRs(t *testing.T) {
 	}
 	if len(submitter.actions) != 0 || len(reviewer.actions) != 0 || len(maintainer.actions) != 0 {
 		t.Fatalf("unexpected API actions: submitter=%#v reviewer=%#v maintainer=%#v", submitter.actions, reviewer.actions, maintainer.actions)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.ActiveConfigVersionID == "" || snapshot.ActiveScopeID == "" {
+		t.Fatalf("active config/scope not recorded: %#v", snapshot)
+	}
+	version := snapshot.ConfigVersions[snapshot.ActiveConfigVersionID]
+	if version.SourceRepo != cfg.Source.Repo || version.TargetRepo != cfg.Target.Repo {
+		t.Fatalf("version repositories = %q -> %q", version.SourceRepo, version.TargetRepo)
+	}
+	if version.ResolvedCommitRange != cfg.Workflow.CommitRange {
+		t.Fatalf("version commit range = %q", version.ResolvedCommitRange)
+	}
+	scope := snapshot.TaskScopes[snapshot.ActiveScopeID]
+	if scope.ConfigVersionID != version.ID || scope.CommitCount != 2 {
+		t.Fatalf("scope = %#v, version = %#v", scope, version)
+	}
+	if task.ConfigVersionID != version.ID || task.ScopeID != scope.ID {
+		t.Fatalf("task config/scope = %q/%q, want %q/%q", task.ConfigVersionID, task.ScopeID, version.ID, scope.ID)
+	}
+	if _, ok := snapshot.TaskRecords[scope.ID+":abcdef123456"]; !ok {
+		t.Fatalf("task record missing: %#v", snapshot.TaskRecords)
 	}
 }
 

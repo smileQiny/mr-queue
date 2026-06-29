@@ -105,7 +105,7 @@ func (r *Runner) RunOnce() error {
 		return err
 	}
 	queueTasks := queueTasksFromCommits(commits)
-	if err := r.store.ReplaceQueueTasks(queueTasks); err != nil {
+	if err := r.store.ReplaceQueueTasksForConfig(r.cfg, queueTasks); err != nil {
 		return err
 	}
 	for _, commit := range commits {
@@ -130,7 +130,7 @@ func (r *Runner) SyncQueue() (int, error) {
 		return 0, err
 	}
 	queueTasks := queueTasksFromCommits(commits)
-	if err := r.store.ReplaceQueueTasks(queueTasks); err != nil {
+	if err := r.store.ReplaceQueueTasksForConfig(r.cfg, queueTasks); err != nil {
 		return 0, err
 	}
 	return len(commits), nil
