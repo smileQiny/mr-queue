@@ -1,28 +1,26 @@
-local:
-  path: "."
+provider: gitcode
+workspace: "/path/to/local/repo"
 
-queue:
-  # Branch A: all prepared commits live here.
-  remote: "private"
+source:
+  # Commits are read from this repository branch. MR branches are pushed back
+  # to the same repository.
+  repo: "gitcode.com/your_namespace/project"
   branch: "queue"
-  # Usually the latest community target branch.
-  base_ref: "community/master"
+  # Optional precise range. If omitted, mr-queue uses target..source.
+  # range: "a3c47d5f^..e34a0a61"
+  # start_sha: "a3c47d5f"
+  # end_sha: "e34a0a61"
 
-private:
-  # MR branches are pushed here as one branch per commit.
-  remote: "private"
+target:
+  # MRs are created into this repository branch.
+  repo: "gitcode.com/community/project"
+  branch: "master"
+
+mr:
   branch_prefix: "mr-queue"
   # Placeholders: {prefix}, {title}, {title_or_sha12}, {sha12}, {sha}.
   # Default is "{prefix}-{sha12}". A readable option is "{prefix}-{title_or_sha12}".
   branch_template: "{prefix}-{sha12}"
-  head_namespace: "your_private_namespace"
-
-community:
-  # MR target.
-  remote: "community"
-  owner: "community"
-  repo: "project"
-  branch: "master"
 
 workflow:
   merge_method: "squash"

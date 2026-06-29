@@ -132,6 +132,259 @@ GITCODE_MAINTAINER_TOKEN=merge-token
 	}
 }
 
+func TestSafeRedactsRemoteURLCredentials(t *testing.T) {
+	cfg := Config{
+		Queue:     Queue{RemoteURL: "https://user:secret@gitcode.com/source/project.git"},
+		Private:   Private{RemoteURL: "https://token@gitcode.com/source/project.git"},
+		Community: Community{RemoteURL: "https://maintainer:secret@gitcode.com/target/project.git"},
+	}
+
+	safe := cfg.Safe()
+	if strings.Contains(safe, "secret") || strings.Contains(safe, "token@") {
+		t.Fatalf("Safe leaked remote URL credential: %s", safe)
+	}
+	if !strings.Contains(safe, "https://gitcode.com/source/project.git") {
+		t.Fatalf("Safe removed queue remote URL host/path: %s", safe)
+	}
+}
+
+func TestLoadSimpleModeDerivesLegacyQueuePrivateCommunity(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/Users/qiny/codespace/syskits"
+source:
+  repo: "gitcode.com/smileQiny/syskits"
+  branch: "new-features"
+  start_sha: "a3c47d5f"
+  end_sha: "e34a0a61"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+mr:
+  branch_prefix: "feat"
+  branch_template: "{prefix}-{title_or_sha12}"
+workflow:
+  merge_method: "external"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+  reviewer:
+    token_env: "GITCODE_REVIEWER_TOKEN"
+`)
+	writeFile(t, envPath, `
+GITCODE_SUBMITTER_TOKEN=sub-token
+GITCODE_REVIEWER_TOKEN=review-token
+`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Provider != "gitcode" {
+		t.Fatalf("provider = %q", cfg.Provider)
+	}
+	if cfg.Workspace != "/Users/qiny/codespace/syskits" || cfg.Local.Path != cfg.Workspace {
+		t.Fatalf("workspace/local = %q/%q", cfg.Workspace, cfg.Local.Path)
+	}
+	if cfg.Source.Repo != "gitcode.com/smileQiny/syskits" {
+		t.Fatalf("source repo = %q", cfg.Source.Repo)
+	}
+	if cfg.Target.Repo != "gitcode.com/openeuler/syskits" {
+		t.Fatalf("target repo = %q", cfg.Target.Repo)
+	}
+	if cfg.Queue.Remote != "mrq-gitcode-com-smileqiny-syskits" {
+		t.Fatalf("queue remote = %q", cfg.Queue.Remote)
+	}
+	if cfg.Queue.RemoteURL != "https://gitcode.com/smileQiny/syskits.git" {
+		t.Fatalf("queue remote url = %q", cfg.Queue.RemoteURL)
+	}
+	if cfg.Queue.Branch != "new-features" {
+		t.Fatalf("queue branch = %q", cfg.Queue.Branch)
+	}
+	if cfg.Queue.BaseRef != "mrq-gitcode-com-openeuler-syskits/master" {
+		t.Fatalf("queue base ref = %q", cfg.Queue.BaseRef)
+	}
+	if cfg.Queue.StartSHA != "a3c47d5f" || cfg.Queue.EndSHA != "e34a0a61" {
+		t.Fatalf("queue bounds = %q..%q", cfg.Queue.StartSHA, cfg.Queue.EndSHA)
+	}
+	if cfg.Workflow.CommitRange != "a3c47d5f^..e34a0a61" {
+		t.Fatalf("commit range = %q", cfg.Workflow.CommitRange)
+	}
+	if cfg.Private.Remote != cfg.Queue.Remote || cfg.Private.RemoteURL != cfg.Queue.RemoteURL {
+		t.Fatalf("private remote = %#v", cfg.Private)
+	}
+	if cfg.Private.HeadNamespace != "smileQiny" {
+		t.Fatalf("head namespace = %q", cfg.Private.HeadNamespace)
+	}
+	if cfg.Private.BranchPrefix != "feat" || cfg.Private.BranchTemplate != "{prefix}-{title_or_sha12}" {
+		t.Fatalf("private branch config = %#v", cfg.Private)
+	}
+	if cfg.Community.Remote != "mrq-gitcode-com-openeuler-syskits" {
+		t.Fatalf("community remote = %q", cfg.Community.Remote)
+	}
+	if cfg.Community.RemoteURL != "https://gitcode.com/openeuler/syskits.git" {
+		t.Fatalf("community remote url = %q", cfg.Community.RemoteURL)
+	}
+	if cfg.Community.Owner != "openeuler" || cfg.Community.Repo != "syskits" || cfg.Community.Branch != "master" {
+		t.Fatalf("community = %#v", cfg.Community)
+	}
+}
+
+func TestLoadSimpleModeUsesExplicitSourceRange(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/repo"
+source:
+  repo: "gitcode.com/smileQiny/syskits"
+  branch: "new-features"
+  range: "abc123^..def456"
+  start_sha: "ignored-start"
+  end_sha: "ignored-end"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Workflow.CommitRange != "abc123^..def456" {
+		t.Fatalf("commit range = %q", cfg.Workflow.CommitRange)
+	}
+}
+
+func TestLoadSimpleModeDefaultsCommitRangeToTargetBranchThroughSourceBranch(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/repo"
+source:
+  repo: "gitcode.com/smileQiny/syskits"
+  branch: "new-features"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	cfg, err := Load(configPath, envPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	want := "mrq-gitcode-com-openeuler-syskits/master..mrq-gitcode-com-smileqiny-syskits/new-features"
+	if cfg.Workflow.CommitRange != want {
+		t.Fatalf("commit range = %q, want %q", cfg.Workflow.CommitRange, want)
+	}
+}
+
+func TestLoadSimpleModeRejectsUnsupportedRepositoryHost(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/repo"
+source:
+  repo: "gitee.com/smileQiny/syskits"
+  branch: "new-features"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	_, err := Load(configPath, envPath)
+	if err == nil {
+		t.Fatal("expected unsupported host error")
+	}
+	if !strings.Contains(err.Error(), "unsupported repository host gitee.com") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadSimpleModeRequiresRepositoryFullPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/repo"
+source:
+  repo: "smileQiny/syskits"
+  branch: "new-features"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	_, err := Load(configPath, envPath)
+	if err == nil {
+		t.Fatal("expected full repository path error")
+	}
+	if !strings.Contains(err.Error(), "source.repo must include repository host") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadSimpleModeRequiresSourceBranchOrRange(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mr-queue.yml")
+	envPath := filepath.Join(dir, ".env")
+
+	writeFile(t, configPath, `
+provider: gitcode
+workspace: "/repo"
+source:
+  repo: "gitcode.com/smileQiny/syskits"
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+auth:
+  submitter:
+    token_env: "GITCODE_SUBMITTER_TOKEN"
+`)
+	writeFile(t, envPath, `GITCODE_SUBMITTER_TOKEN=sub-token`)
+
+	_, err := Load(configPath, envPath)
+	if err == nil {
+		t.Fatal("expected missing source branch error")
+	}
+	if !strings.Contains(err.Error(), "source.branch is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestWorkflowDefaultsSplitWaitAndNextPRDelayRanges(t *testing.T) {
 	cfg := Config{}
 	cfg.applyDefaults()

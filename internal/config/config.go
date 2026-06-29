@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,12 +14,15 @@ import (
 )
 
 type Config struct {
+	Provider  string    `yaml:"provider" json:"provider"`
+	Workspace string    `yaml:"workspace" json:"workspace"`
 	Local     Local     `yaml:"local" json:"local"`
 	Queue     Queue     `yaml:"queue" json:"queue"`
 	Private   Private   `yaml:"private" json:"private"`
 	Community Community `yaml:"community" json:"community"`
 	Source    Source    `yaml:"source" json:"source"`
 	Target    Target    `yaml:"target" json:"target"`
+	MR        MR        `yaml:"mr" json:"mr"`
 	Workflow  Workflow  `yaml:"workflow" json:"workflow"`
 	Auth      Auth      `yaml:"auth" json:"auth"`
 }
@@ -27,29 +32,37 @@ type Local struct {
 }
 
 type Queue struct {
-	Remote   string `yaml:"remote" json:"remote"`
-	Branch   string `yaml:"branch" json:"branch"`
-	BaseRef  string `yaml:"base_ref" json:"base_ref"`
-	StartSHA string `yaml:"start_sha" json:"start_sha"`
-	EndSHA   string `yaml:"end_sha" json:"end_sha"`
+	Remote    string `yaml:"remote" json:"remote"`
+	RemoteURL string `yaml:"remote_url" json:"remote_url"`
+	Branch    string `yaml:"branch" json:"branch"`
+	BaseRef   string `yaml:"base_ref" json:"base_ref"`
+	StartSHA  string `yaml:"start_sha" json:"start_sha"`
+	EndSHA    string `yaml:"end_sha" json:"end_sha"`
 }
 
 type Private struct {
 	Remote         string `yaml:"remote" json:"remote"`
+	RemoteURL      string `yaml:"remote_url" json:"remote_url"`
 	BranchPrefix   string `yaml:"branch_prefix" json:"branch_prefix"`
 	BranchTemplate string `yaml:"branch_template" json:"branch_template"`
 	HeadNamespace  string `yaml:"head_namespace" json:"head_namespace"`
 }
 
 type Community struct {
-	Remote string `yaml:"remote" json:"remote"`
-	Owner  string `yaml:"owner" json:"owner"`
-	Repo   string `yaml:"repo" json:"repo"`
-	Branch string `yaml:"branch" json:"branch"`
+	Remote    string `yaml:"remote" json:"remote"`
+	RemoteURL string `yaml:"remote_url" json:"remote_url"`
+	Owner     string `yaml:"owner" json:"owner"`
+	Repo      string `yaml:"repo" json:"repo"`
+	Branch    string `yaml:"branch" json:"branch"`
 }
 
 type Source struct {
 	LocalPath      string `yaml:"local_path" json:"local_path"`
+	Repo           string `yaml:"repo" json:"repo"`
+	Branch         string `yaml:"branch" json:"branch"`
+	Range          string `yaml:"range" json:"range"`
+	StartSHA       string `yaml:"start_sha" json:"start_sha"`
+	EndSHA         string `yaml:"end_sha" json:"end_sha"`
 	BaseRef        string `yaml:"base_ref" json:"base_ref"`
 	Remote         string `yaml:"remote" json:"remote"`
 	BranchPrefix   string `yaml:"branch_prefix" json:"branch_prefix"`
@@ -61,6 +74,11 @@ type Target struct {
 	Owner  string `yaml:"owner" json:"owner"`
 	Repo   string `yaml:"repo" json:"repo"`
 	Branch string `yaml:"branch" json:"branch"`
+}
+
+type MR struct {
+	BranchPrefix   string `yaml:"branch_prefix" json:"branch_prefix"`
+	BranchTemplate string `yaml:"branch_template" json:"branch_template"`
 }
 
 type Workflow struct {
@@ -177,6 +195,9 @@ func Load(configPath string, envPath string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config %s: %w", configPath, err)
 	}
 	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.resolveTokens(); err != nil {
 		return Config{}, err
 	}
@@ -188,6 +209,9 @@ func (c Config) Safe() string {
 	safe.Auth.Submitter.Token = ""
 	safe.Auth.Reviewer.Token = ""
 	safe.Auth.Maintainer.Token = ""
+	safe.Queue.RemoteURL = redactURLCredential(safe.Queue.RemoteURL)
+	safe.Private.RemoteURL = redactURLCredential(safe.Private.RemoteURL)
+	safe.Community.RemoteURL = redactURLCredential(safe.Community.RemoteURL)
 	body, err := json.MarshalIndent(safe, "", "  ")
 	if err != nil {
 		return "{}"
@@ -195,12 +219,187 @@ func (c Config) Safe() string {
 	return string(body)
 }
 
+func redactURLCredential(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+func (c *Config) applySimpleMode() {
+	if c.Provider == "" {
+		c.Provider = inferProvider(c.Source.Repo, c.Target.Repo)
+	}
+	if c.Workspace != "" {
+		if c.Local.Path == "" {
+			c.Local.Path = c.Workspace
+		}
+		if c.Source.LocalPath == "" {
+			c.Source.LocalPath = c.Workspace
+		}
+	}
+	sourceRepo, sourceOK := parseRepoRef(c.Provider, c.Source.Repo)
+	if sourceOK {
+		if c.Queue.Remote == "" {
+			c.Queue.Remote = sourceRepo.remoteName()
+		}
+		if c.Queue.RemoteURL == "" {
+			c.Queue.RemoteURL = sourceRepo.cloneURL()
+		}
+		if c.Queue.Branch == "" {
+			c.Queue.Branch = c.Source.Branch
+		}
+		if c.Private.Remote == "" {
+			c.Private.Remote = c.Queue.Remote
+		}
+		if c.Private.RemoteURL == "" {
+			c.Private.RemoteURL = c.Queue.RemoteURL
+		}
+		if c.Private.HeadNamespace == "" {
+			c.Private.HeadNamespace = sourceRepo.Owner
+		}
+		if c.Source.Remote == "" {
+			c.Source.Remote = c.Queue.Remote
+		}
+		if c.Source.HeadNamespace == "" {
+			c.Source.HeadNamespace = sourceRepo.Owner
+		}
+	}
+	targetRepo, targetOK := parseRepoRef(c.Provider, c.Target.Repo)
+	if targetOK {
+		if c.Community.Remote == "" {
+			c.Community.Remote = targetRepo.remoteName()
+		}
+		if c.Community.RemoteURL == "" {
+			c.Community.RemoteURL = targetRepo.cloneURL()
+		}
+		if c.Community.Owner == "" {
+			c.Community.Owner = targetRepo.Owner
+		}
+		if c.Community.Repo == "" || strings.Contains(c.Community.Repo, "/") {
+			c.Community.Repo = targetRepo.Name
+		}
+		if c.Target.Owner == "" {
+			c.Target.Owner = targetRepo.Owner
+		}
+	}
+	if c.Target.Branch != "" && c.Community.Branch == "" {
+		c.Community.Branch = c.Target.Branch
+	}
+	if c.Source.StartSHA != "" && c.Queue.StartSHA == "" {
+		c.Queue.StartSHA = c.Source.StartSHA
+	}
+	if c.Source.EndSHA != "" && c.Queue.EndSHA == "" {
+		c.Queue.EndSHA = c.Source.EndSHA
+	}
+	if c.MR.BranchPrefix != "" && c.Private.BranchPrefix == "" {
+		c.Private.BranchPrefix = c.MR.BranchPrefix
+	}
+	if c.MR.BranchTemplate != "" && c.Private.BranchTemplate == "" {
+		c.Private.BranchTemplate = c.MR.BranchTemplate
+	}
+}
+
+type repoRef struct {
+	Host  string
+	Owner string
+	Name  string
+}
+
+func parseRepoRef(provider string, value string) (repoRef, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return repoRef{}, false
+	}
+	value = strings.TrimSuffix(value, ".git")
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimPrefix(value, "http://")
+	if before, after, ok := strings.Cut(value, "@"); ok {
+		value = before + "/" + after
+	}
+	value = strings.ReplaceAll(value, ":", "/")
+	parts := strings.Split(value, "/")
+	if len(parts) == 2 {
+		host := hostForProvider(provider)
+		if host == "" {
+			return repoRef{}, false
+		}
+		return repoRef{Host: host, Owner: parts[0], Name: parts[1]}, true
+	}
+	if len(parts) >= 3 {
+		return repoRef{Host: parts[0], Owner: parts[len(parts)-2], Name: parts[len(parts)-1]}, true
+	}
+	return repoRef{}, false
+}
+
+func inferProvider(values ...string) string {
+	for _, value := range values {
+		repo, ok := parseRepoRef("", value)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(repo.Host) {
+		case "gitcode.com":
+			return "gitcode"
+		}
+	}
+	return ""
+}
+
+func hostForProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gitcode":
+		return "gitcode.com"
+	default:
+		return ""
+	}
+}
+
+func (r repoRef) cloneURL() string {
+	return fmt.Sprintf("https://%s/%s/%s.git", r.Host, r.Owner, r.Name)
+}
+
+func (r repoRef) remoteName() string {
+	return "mrq-" + slugify(strings.Join([]string{r.Host, r.Owner, r.Name}, "-"))
+}
+
+func remoteURLFor(provider string, owner string, repo string) string {
+	if owner == "" || repo == "" {
+		return ""
+	}
+	host := hostForProvider(provider)
+	if host == "" {
+		return ""
+	}
+	return repoRef{Host: host, Owner: owner, Name: repo}.cloneURL()
+}
+
+var slugPattern = regexp.MustCompile(`[^a-z0-9]+`)
+
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = slugPattern.ReplaceAllString(value, "-")
+	return strings.Trim(value, "-")
+}
+
 func (c *Config) applyDefaults() {
+	c.applySimpleMode()
 	if c.Local.Path == "" {
 		c.Local.Path = c.Source.LocalPath
 	}
+	if c.Local.Path == "" {
+		c.Local.Path = c.Workspace
+	}
 	if c.Private.Remote == "" {
 		c.Private.Remote = c.Source.Remote
+	}
+	if c.Private.RemoteURL == "" {
+		c.Private.RemoteURL = c.Queue.RemoteURL
 	}
 	if c.Private.BranchPrefix == "" {
 		c.Private.BranchPrefix = c.Source.BranchPrefix
@@ -220,8 +419,23 @@ func (c *Config) applyDefaults() {
 	if c.Community.Branch == "" {
 		c.Community.Branch = c.Target.Branch
 	}
+	if c.Community.RemoteURL == "" {
+		c.Community.RemoteURL = remoteURLFor(c.Provider, c.Community.Owner, c.Community.Repo)
+	}
 	if c.Queue.Remote == "" {
 		c.Queue.Remote = c.Private.Remote
+	}
+	if c.Queue.RemoteURL == "" {
+		c.Queue.RemoteURL = c.Private.RemoteURL
+	}
+	if c.Queue.Branch == "" {
+		c.Queue.Branch = c.Source.Branch
+	}
+	if c.Queue.StartSHA == "" {
+		c.Queue.StartSHA = c.Source.StartSHA
+	}
+	if c.Queue.EndSHA == "" {
+		c.Queue.EndSHA = c.Source.EndSHA
 	}
 	if c.Queue.BaseRef == "" {
 		if c.Community.Remote != "" && c.Community.Branch != "" {
@@ -238,6 +452,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Local.Path == "" {
 		c.Local.Path = c.Source.LocalPath
+	}
+	if c.Workspace == "" {
+		c.Workspace = c.Local.Path
 	}
 	if c.Source.Remote == "" {
 		c.Source.Remote = c.Private.Remote
@@ -306,12 +523,61 @@ func (c *Config) applyDefaults() {
 	if c.Workflow.NextPRDelayMax == "" {
 		c.Workflow.NextPRDelayMax = c.Workflow.LoopDelayMax
 	}
+	if c.Workflow.CommitRange == "" && c.Source.Range != "" {
+		c.Workflow.CommitRange = c.Source.Range
+	}
 	if c.Workflow.CommitRange == "" && c.Queue.StartSHA != "" && c.Queue.EndSHA != "" {
 		c.Workflow.CommitRange = c.Queue.StartSHA + "^.." + c.Queue.EndSHA
 	}
 	if c.Workflow.CommitRange == "" && c.Queue.Remote != "" && c.Queue.Branch != "" && c.Queue.BaseRef != "" {
 		c.Workflow.CommitRange = c.Queue.BaseRef + ".." + c.Queue.Remote + "/" + c.Queue.Branch
 	}
+}
+
+func (c Config) validate() error {
+	if strings.TrimSpace(c.Source.Repo) != "" {
+		if !repoHasHost(c.Source.Repo) {
+			return fmt.Errorf("source.repo must include repository host, for example gitcode.com/owner/repo")
+		}
+		if strings.TrimSpace(c.Source.Branch) == "" && strings.TrimSpace(c.Source.Range) == "" && (strings.TrimSpace(c.Source.StartSHA) == "" || strings.TrimSpace(c.Source.EndSHA) == "") {
+			return fmt.Errorf("source.branch is required unless source.range or both source.start_sha and source.end_sha are set")
+		}
+	}
+	if strings.TrimSpace(c.Source.Repo) != "" && strings.TrimSpace(c.Target.Repo) != "" && !repoHasHost(c.Target.Repo) {
+		return fmt.Errorf("target.repo must include repository host, for example gitcode.com/owner/repo")
+	}
+	for _, item := range []struct {
+		name  string
+		value string
+	}{
+		{name: "source.repo", value: c.Source.Repo},
+		{name: "target.repo", value: c.Target.Repo},
+	} {
+		if err := validateRepoHost(c.Provider, item.name, item.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func repoHasHost(value string) bool {
+	value = strings.TrimSpace(value)
+	value = strings.TrimSuffix(value, ".git")
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimPrefix(value, "http://")
+	parts := strings.Split(value, "/")
+	return len(parts) >= 3
+}
+
+func validateRepoHost(provider string, name string, value string) error {
+	repo, ok := parseRepoRef(provider, value)
+	if !ok {
+		return nil
+	}
+	if strings.EqualFold(repo.Host, "gitcode.com") {
+		return nil
+	}
+	return fmt.Errorf("%s uses unsupported repository host %s; only gitcode.com is supported", name, repo.Host)
 }
 
 func (c *Config) resolveTokens() error {

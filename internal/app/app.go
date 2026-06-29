@@ -44,13 +44,31 @@ func Build(configPath string, envPath string, statePath string) (*Runtime, error
 		cfg,
 		store,
 		runner.LocalGitOps{
-			Dir:         cfg.Local.Path,
-			Username:    cfg.Private.HeadNamespace,
-			AccessToken: cfg.Auth.Submitter.Token,
+			Dir:            cfg.Local.Path,
+			Username:       cfg.Private.HeadNamespace,
+			AccessToken:    cfg.Auth.Submitter.Token,
+			ManagedRemotes: managedRemotes(cfg),
 		},
 		submitter,
 		gitcode.NewClient(reviewerToken),
 		gitcode.NewClient(maintainerToken),
 	)
 	return &Runtime{Config: &cfg, State: store, Runner: r}, nil
+}
+
+func managedRemotes(cfg config.Config) map[string]string {
+	remotes := map[string]string{}
+	if cfg.Queue.Remote != "" && cfg.Queue.RemoteURL != "" {
+		remotes[cfg.Queue.Remote] = cfg.Queue.RemoteURL
+	}
+	if cfg.Private.Remote != "" && cfg.Private.RemoteURL != "" {
+		remotes[cfg.Private.Remote] = cfg.Private.RemoteURL
+	}
+	if cfg.Community.Remote != "" && cfg.Community.RemoteURL != "" {
+		remotes[cfg.Community.Remote] = cfg.Community.RemoteURL
+	}
+	if len(remotes) == 0 {
+		return nil
+	}
+	return remotes
 }

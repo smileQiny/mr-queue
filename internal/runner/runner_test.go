@@ -1709,6 +1709,69 @@ func TestLocalGitOpsListCommitsReturnsEmptyForRepoWithoutCommits(t *testing.T) {
 	}
 }
 
+func TestLocalGitOpsRefreshRefsAddsMissingManagedRemote(t *testing.T) {
+	dir := t.TempDir()
+	sourceRemote := filepath.Join(t.TempDir(), "source.git")
+	targetRemote := filepath.Join(t.TempDir(), "target.git")
+	if err := os.MkdirAll(sourceRemote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetRemote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, sourceRemote, "init", "--bare")
+	runGit(t, targetRemote, "init", "--bare")
+	runGit(t, dir, "init")
+
+	gitOps := LocalGitOps{
+		Dir: dir,
+		ManagedRemotes: map[string]string{
+			"mrq-source": sourceRemote,
+			"mrq-target": targetRemote,
+		},
+	}
+	if err := gitOps.RefreshRefs([]string{"mrq-source", "mrq-target"}); err != nil {
+		t.Fatalf("RefreshRefs returned error: %v", err)
+	}
+
+	if got := gitOutput(t, dir, "remote", "get-url", "mrq-source"); got != sourceRemote {
+		t.Fatalf("source remote url = %q", got)
+	}
+	if got := gitOutput(t, dir, "remote", "get-url", "mrq-target"); got != targetRemote {
+		t.Fatalf("target remote url = %q", got)
+	}
+}
+
+func TestLocalGitOpsRefreshRefsUpdatesManagedRemoteURL(t *testing.T) {
+	dir := t.TempDir()
+	oldRemote := filepath.Join(t.TempDir(), "old.git")
+	newRemote := filepath.Join(t.TempDir(), "new.git")
+	if err := os.MkdirAll(oldRemote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newRemote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, oldRemote, "init", "--bare")
+	runGit(t, newRemote, "init", "--bare")
+	runGit(t, dir, "init")
+	runGit(t, dir, "remote", "add", "mrq-source", oldRemote)
+
+	gitOps := LocalGitOps{
+		Dir: dir,
+		ManagedRemotes: map[string]string{
+			"mrq-source": newRemote,
+		},
+	}
+	if err := gitOps.RefreshRefs([]string{"mrq-source"}); err != nil {
+		t.Fatalf("RefreshRefs returned error: %v", err)
+	}
+
+	if got := gitOutput(t, dir, "remote", "get-url", "mrq-source"); got != newRemote {
+		t.Fatalf("source remote url = %q", got)
+	}
+}
+
 func TestLocalGitOpsPushSingleCommitBranchCreatesBranchWithOnlyOneCommitOverBase(t *testing.T) {
 	dir := t.TempDir()
 	remote := filepath.Join(t.TempDir(), "remote.git")

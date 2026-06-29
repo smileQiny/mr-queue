@@ -699,9 +699,10 @@ func (r *Runner) fail(sha string, err error) error {
 }
 
 type LocalGitOps struct {
-	Dir         string
-	Username    string
-	AccessToken string
+	Dir            string
+	Username       string
+	AccessToken    string
+	ManagedRemotes map[string]string
 }
 
 func (g LocalGitOps) RefreshRefs(remotes []string) error {
@@ -709,11 +710,32 @@ func (g LocalGitOps) RefreshRefs(remotes []string) error {
 		if strings.TrimSpace(remote) == "" {
 			continue
 		}
+		if err := g.ensureManagedRemote(remote); err != nil {
+			return err
+		}
 		if err := g.run("fetch", "--prune", remote); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (g LocalGitOps) ensureManagedRemote(remote string) error {
+	remoteURL := strings.TrimSpace(g.ManagedRemotes[remote])
+	if remoteURL == "" {
+		return nil
+	}
+	currentURL, err := g.git("remote", "get-url", remote)
+	if err != nil {
+		if strings.Contains(err.Error(), "No such remote") || strings.Contains(err.Error(), "No such remote '") {
+			return g.run("remote", "add", remote, remoteURL)
+		}
+		return err
+	}
+	if strings.TrimSpace(currentURL) == remoteURL {
+		return nil
+	}
+	return g.run("remote", "set-url", remote, remoteURL)
 }
 
 func (g LocalGitOps) ListCommits(commitRange string) ([]Commit, error) {
@@ -841,6 +863,10 @@ func (g LocalGitOps) git(args ...string) (string, error) {
 		return "", fmt.Errorf("git %s failed: %w\n%s", strings.Join(args, " "), err, string(out))
 	}
 	return string(out), nil
+}
+
+func (g LocalGitOps) GitForDoctor(args ...string) (string, error) {
+	return g.git(args...)
 }
 
 func (g LocalGitOps) configureCredentialEnv(cmd *exec.Cmd) (func(), error) {
