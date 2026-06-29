@@ -54,6 +54,7 @@ func TestRunReportsConfigWorkspaceAndTokenChecks(t *testing.T) {
 	assertCheck(t, report, "auth.maintainer", StatusOK)
 	assertCheck(t, report, "git.source.fetch", StatusOK)
 	assertCheck(t, report, "git.target.fetch", StatusOK)
+	assertCheck(t, report, "git.source.push_auth", StatusOK)
 	assertCheck(t, report, "git.commit_range", StatusOK)
 	assertCheck(t, report, "api.target", StatusOK)
 	if !report.OK {
@@ -142,12 +143,55 @@ func TestRunFixesManagedRemotesWhenRequested(t *testing.T) {
 	}
 }
 
+func TestRunReportsSourcePushAuthFailure(t *testing.T) {
+	cfg := config.Config{
+		Local: config.Local{Path: "/repo"},
+		Queue: config.Queue{
+			Remote:    "mrq-source",
+			RemoteURL: "https://gitcode.com/source/project.git",
+		},
+		Private: config.Private{
+			Remote:       "mrq-source",
+			RemoteURL:    "https://gitcode.com/source/project.git",
+			BranchPrefix: "feat",
+		},
+		Auth: config.Auth{
+			Submitter: config.Credential{TokenEnv: "GITCODE_SUBMITTER_TOKEN", Token: "submit-token"},
+		},
+	}
+	git := &fakeGit{isRepo: true, pushErr: errFake("permission denied")}
+
+	report := Run(cfg, Options{}, git, fakeAPI{})
+
+	check := findCheck(report, "git.source.push_auth")
+	if check.Status != StatusError {
+		t.Fatalf("source push auth status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Message, "cannot dry-run push") {
+		t.Fatalf("source push auth message = %q", check.Message)
+	}
+	if !strings.Contains(check.Fix, "GITCODE_SUBMITTER_TOKEN") {
+		t.Fatalf("source push auth fix should mention submitter token: %q", check.Fix)
+	}
+	if !strings.Contains(check.Fix, "SSH key") {
+		t.Fatalf("source push auth fix should mention SSH key: %q", check.Fix)
+	}
+	if report.OK {
+		t.Fatal("report should not be OK")
+	}
+	if len(git.pushChecks) != 1 || git.pushChecks[0] != "mrq-source:feat-doctor-check" {
+		t.Fatalf("push checks = %#v", git.pushChecks)
+	}
+}
+
 type fakeGit struct {
 	isRepo       bool
 	remoteStates map[string]RemoteState
 	fixedRemotes []string
 	fetchErrs    map[string]error
 	rangeErr     error
+	pushErr      error
+	pushChecks   []string
 }
 
 func (g fakeGit) IsRepository(path string) bool {
@@ -175,6 +219,17 @@ func (g fakeGit) Fetch(remote string) error {
 
 func (g fakeGit) CheckCommitRange(commitRange string) error {
 	return g.rangeErr
+}
+
+func (g *fakeGit) CheckPushAccess(remote string, branch string) error {
+	g.pushChecks = append(g.pushChecks, remote+":"+branch)
+	return g.pushErr
+}
+
+type errFake string
+
+func (e errFake) Error() string {
+	return string(e)
 }
 
 type fakeAPI struct {

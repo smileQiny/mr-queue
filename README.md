@@ -93,10 +93,26 @@ manual checks.
 - whether `workspace` is a Git repository
 - managed source/target remotes, with `--fix` adding or updating them
 - source and target fetch connectivity
+- source push authentication with `git push --dry-run`
 - the resolved commit range
 - GitCode target repository API access
 
-It does not create MRs or push test branches.
+It does not create MRs or push test branches. The push check is a dry run, so it
+verifies credentials without creating the `*-doctor-check` branch on the remote.
+
+### Git Account Check
+
+`mr-queue` runs Git commands inside `workspace`; you do not need to `cd` or
+`pushd` into a source remote. In Simple Mode, generated MR branches are pushed
+to `source.repo`, so the submitter account must be allowed to create or update
+branches there.
+
+For the default HTTPS remotes derived from `source.repo`, `mr-queue` supplies
+`auth.submitter.token_env` to Git through `GIT_ASKPASS`. Set that environment
+variable to a GitCode token that can push to the source repository. If you
+override a remote to use SSH, configure your local SSH key for the source
+repository instead. `doctor` reports `git.source.push_auth` when this account
+or key is not ready.
 
 ## Simple Mode
 

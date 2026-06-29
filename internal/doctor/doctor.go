@@ -36,6 +36,7 @@ type GitChecker interface {
 	RemoteState(name string, desiredURL string) (RemoteState, error)
 	EnsureRemote(name string, desiredURL string) error
 	Fetch(remote string) error
+	CheckPushAccess(remote string, branch string) error
 	CheckCommitRange(commitRange string) error
 }
 
@@ -94,6 +95,7 @@ func Run(cfg config.Config, options Options, git GitChecker, api APIChecker) Rep
 				add("git."+remoteRole(cfg, remote)+".fetch", StatusOK, "fetched "+remote, "")
 			}
 		}
+		checkSourcePushAccess(add, cfg, git, remoteReady)
 		if strings.TrimSpace(cfg.Workflow.CommitRange) != "" {
 			if err := git.CheckCommitRange(cfg.Workflow.CommitRange); err != nil {
 				add("git.commit_range", StatusError, fmt.Sprintf("cannot read commit range %s: %v", cfg.Workflow.CommitRange, err), "check source/target branches or source.range")
@@ -112,6 +114,66 @@ func Run(cfg config.Config, options Options, git GitChecker, api APIChecker) Rep
 	}
 
 	return report
+}
+
+func checkSourcePushAccess(add func(string, Status, string, string), cfg config.Config, git GitChecker, remoteReady map[string]bool) {
+	remote := strings.TrimSpace(cfg.Private.Remote)
+	if remote == "" {
+		remote = strings.TrimSpace(cfg.Queue.Remote)
+	}
+	if remote == "" {
+		return
+	}
+	if ready, ok := remoteReady[remote]; ok && !ready {
+		add("git.source.push_auth", StatusWarn, "skipped source push check because remote "+remote+" is not prepared", "rerun doctor with --fix")
+		return
+	}
+	branch := doctorBranchName(cfg)
+	if err := git.CheckPushAccess(remote, branch); err != nil {
+		add("git.source.push_auth", StatusError, fmt.Sprintf("cannot dry-run push %s to %s: %v", branch, remote, err), sourcePushFix(cfg))
+		return
+	}
+	add("git.source.push_auth", StatusOK, "dry-run push to source remote "+remote+" succeeded", "")
+}
+
+func doctorBranchName(cfg config.Config) string {
+	prefix := strings.TrimSpace(cfg.Private.BranchPrefix)
+	if prefix == "" {
+		prefix = strings.TrimSpace(cfg.MR.BranchPrefix)
+	}
+	if prefix == "" {
+		prefix = "mr-queue"
+	}
+	prefix = normalizeRefPart(prefix)
+	if prefix == "" {
+		prefix = "mr-queue"
+	}
+	return prefix + "-doctor-check"
+}
+
+func normalizeRefPart(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '/' || r == '_' {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-/.")
+}
+
+func sourcePushFix(cfg config.Config) string {
+	tokenEnv := strings.TrimSpace(cfg.Auth.Submitter.TokenEnv)
+	if tokenEnv == "" {
+		tokenEnv = "auth.submitter.token_env"
+	}
+	return "grant the submitter account push permission to source.repo; for HTTPS set " + tokenEnv + " to a GitCode token that can push branches, or configure an SSH key accepted by the source repository"
 }
 
 func checkToken(add func(string, Status, string, string), name string, cred config.Credential, required bool) {

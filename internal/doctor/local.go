@@ -54,6 +54,14 @@ func (g LocalGitChecker) Fetch(remote string) error {
 	return g.run("fetch", "--prune", remote)
 }
 
+func (g LocalGitChecker) CheckPushAccess(remote string, branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		branch = "mr-queue-doctor-check"
+	}
+	return g.run("push", "--dry-run", remote, "HEAD:refs/heads/"+branch)
+}
+
 func (g LocalGitChecker) CheckCommitRange(commitRange string) error {
 	_, err := g.git("log", "--oneline", "-1", commitRange)
 	return err

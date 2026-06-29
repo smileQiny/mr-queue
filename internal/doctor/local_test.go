@@ -56,6 +56,31 @@ func TestLocalGitCheckerChecksCommitRange(t *testing.T) {
 	}
 }
 
+func TestLocalGitCheckerChecksPushAccessWithDryRun(t *testing.T) {
+	dir := t.TempDir()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, remote, "init", "--bare")
+
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	writeFile(t, filepath.Join(dir, "README.md"), "hello\n")
+	runGit(t, dir, "add", "README.md")
+	runGit(t, dir, "commit", "-m", "initial")
+	runGit(t, dir, "remote", "add", "mrq-source", remote)
+
+	checker := LocalGitChecker{Dir: dir}
+	if err := checker.CheckPushAccess("mrq-source", "feat-doctor-check"); err != nil {
+		t.Fatalf("CheckPushAccess returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(remote, "refs", "heads", "feat-doctor-check")); err == nil {
+		t.Fatal("dry-run push created a remote branch")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
