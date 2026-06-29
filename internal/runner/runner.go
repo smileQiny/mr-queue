@@ -29,7 +29,11 @@ type GitOps interface {
 	RefreshRefs(remotes []string) error
 	ListCommits(commitRange string) ([]Commit, error)
 	IsCommitAlreadyApplied(commit Commit, baseRef string) (bool, error)
-	PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string) (string, error)
+	PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string, options PushOptions) (string, error)
+}
+
+type PushOptions struct {
+	ConflictStrategy string
 }
 
 type PullClient interface {
@@ -461,7 +465,9 @@ func (r *Runner) process(commit Commit) error {
 			if err := r.store.AppendLog(sha, "push", fmt.Sprintf("Pushing %s to %s", sha, branch)); err != nil {
 				return err
 			}
-			mrCommitSHA, err := r.gitOps.PushSingleCommitBranch(commit, branch, r.queueBaseRef(), r.privateRemote())
+			mrCommitSHA, err := r.gitOps.PushSingleCommitBranch(commit, branch, r.queueBaseRef(), r.privateRemote(), PushOptions{
+				ConflictStrategy: task.CherryPickConflictStrategy,
+			})
 			if err != nil {
 				if errors.Is(err, ErrEmptyCherryPick) {
 					if err := r.store.SetTaskStatus(sha, state.StatusSkipped, ""); err != nil {
@@ -794,7 +800,7 @@ func (g LocalGitOps) IsCommitAlreadyApplied(commit Commit, baseRef string) (bool
 	return false, nil
 }
 
-func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string) (string, error) {
+func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string, options PushOptions) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "mr-queue-worktree-*")
 	if err != nil {
 		return "", err
@@ -817,8 +823,19 @@ func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, ba
 			_ = g.run("worktree", "remove", "--force", tmpDir)
 			return "", ErrEmptyCherryPick
 		}
-		_ = g.run("worktree", "remove", "--force", tmpDir)
-		return "", err
+		if strings.TrimSpace(options.ConflictStrategy) != "" {
+			if resolveErr := worktree.resolveCherryPickConflict(options.ConflictStrategy); resolveErr != nil {
+				_ = worktree.run("cherry-pick", "--abort")
+				_ = g.run("worktree", "remove", "--force", tmpDir)
+				if errors.Is(resolveErr, ErrEmptyCherryPick) {
+					return "", ErrEmptyCherryPick
+				}
+				return "", fmt.Errorf("%w\nresolve cherry-pick conflict with %q failed: %v", err, options.ConflictStrategy, resolveErr)
+			}
+		} else {
+			_ = g.run("worktree", "remove", "--force", tmpDir)
+			return "", err
+		}
 	}
 	mrCommitSHA, err := worktree.git("rev-parse", "HEAD")
 	if err != nil {
@@ -837,6 +854,31 @@ func (g LocalGitOps) PushSingleCommitBranch(commit Commit, branchName string, ba
 		return "", err
 	}
 	return mrCommitSHA, nil
+}
+
+func (g LocalGitOps) resolveCherryPickConflict(strategy string) error {
+	var flag string
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "theirs":
+		flag = "--theirs"
+	case "ours":
+		flag = "--ours"
+	default:
+		return fmt.Errorf("unsupported cherry-pick conflict strategy %q", strategy)
+	}
+	if err := g.run("checkout", flag, "--", "."); err != nil {
+		return err
+	}
+	if err := g.run("add", "-A"); err != nil {
+		return err
+	}
+	if err := g.run("cherry-pick", "--continue"); err != nil {
+		if isEmptyCherryPickError(err) {
+			return ErrEmptyCherryPick
+		}
+		return err
+	}
+	return nil
 }
 
 func isEmptyCherryPickError(err error) bool {

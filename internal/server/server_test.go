@@ -95,6 +95,54 @@ func TestStatusIncludesStartupDoctorReport(t *testing.T) {
 	}
 }
 
+func TestRetryAPIStoresConflictStrategy(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceQueueTasksForConfig(config.Config{}, []state.QueueTask{{SHA: "abc123", Subject: "Conflicting commit"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("abc123", state.StatusFailed, "cherry-pick conflict"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{runtime: &app.Runtime{Config: &config.Config{}, State: store}}
+	req := httptest.NewRequest("POST", "/api/retry?sha=abc123&conflict_strategy=theirs", nil)
+	w := httptest.NewRecorder()
+
+	s.retry(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	task := store.Snapshot().Tasks["abc123"]
+	if task.Status != state.StatusPending {
+		t.Fatalf("status = %q", task.Status)
+	}
+	if task.CherryPickConflictStrategy != "theirs" {
+		t.Fatalf("conflict strategy = %q", task.CherryPickConflictStrategy)
+	}
+}
+
+func TestRetryAPIRejectsUnknownConflictStrategy(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceQueueTasksForConfig(config.Config{}, []state.QueueTask{{SHA: "abc123", Subject: "Conflicting commit"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{runtime: &app.Runtime{Config: &config.Config{}, State: store}}
+	req := httptest.NewRequest("POST", "/api/retry?sha=abc123&conflict_strategy=maybe", nil)
+	w := httptest.NewRecorder()
+
+	s.retry(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
 func TestDoctorAPIRunsDoctorAndReturnsReport(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

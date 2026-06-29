@@ -44,27 +44,28 @@ type Snapshot struct {
 }
 
 type Task struct {
-	SHA                string     `json:"sha"`
-	Subject            string     `json:"subject"`
-	Status             string     `json:"status"`
-	QueueIndex         int        `json:"queue_index"`
-	ConfigVersionID    string     `json:"config_version_id,omitempty"`
-	ScopeID            string     `json:"scope_id,omitempty"`
-	SourceRepo         string     `json:"source_repo,omitempty"`
-	SourceBranch       string     `json:"source_branch,omitempty"`
-	TargetRepo         string     `json:"target_repo,omitempty"`
-	TargetBranch       string     `json:"target_branch,omitempty"`
-	CommitRange        string     `json:"commit_range,omitempty"`
-	Branch             string     `json:"branch,omitempty"`
-	MRCommitSHA        string     `json:"mr_commit_sha,omitempty"`
-	CommunityCommitSHA string     `json:"community_commit_sha,omitempty"`
-	MRNumber           int        `json:"mr_number,omitempty"`
-	MRURL              string     `json:"mr_url,omitempty"`
-	Error              string     `json:"error,omitempty"`
-	Attempts           int        `json:"attempts"`
-	CreatedAt          string     `json:"created_at"`
-	UpdatedAt          string     `json:"updated_at"`
-	Logs               []LogEntry `json:"logs"`
+	SHA                        string     `json:"sha"`
+	Subject                    string     `json:"subject"`
+	Status                     string     `json:"status"`
+	QueueIndex                 int        `json:"queue_index"`
+	ConfigVersionID            string     `json:"config_version_id,omitempty"`
+	ScopeID                    string     `json:"scope_id,omitempty"`
+	SourceRepo                 string     `json:"source_repo,omitempty"`
+	SourceBranch               string     `json:"source_branch,omitempty"`
+	TargetRepo                 string     `json:"target_repo,omitempty"`
+	TargetBranch               string     `json:"target_branch,omitempty"`
+	CommitRange                string     `json:"commit_range,omitempty"`
+	CherryPickConflictStrategy string     `json:"cherry_pick_conflict_strategy,omitempty"`
+	Branch                     string     `json:"branch,omitempty"`
+	MRCommitSHA                string     `json:"mr_commit_sha,omitempty"`
+	CommunityCommitSHA         string     `json:"community_commit_sha,omitempty"`
+	MRNumber                   int        `json:"mr_number,omitempty"`
+	MRURL                      string     `json:"mr_url,omitempty"`
+	Error                      string     `json:"error,omitempty"`
+	Attempts                   int        `json:"attempts"`
+	CreatedAt                  string     `json:"created_at"`
+	UpdatedAt                  string     `json:"updated_at"`
+	Logs                       []LogEntry `json:"logs"`
 }
 
 type ConfigVersion struct {
@@ -377,10 +378,15 @@ func (s *Store) AppendLog(sha string, step string, message string) error {
 }
 
 func (s *Store) RetryTask(sha string) error {
+	return s.RetryTaskWithConflictStrategy(sha, "")
+}
+
+func (s *Store) RetryTaskWithConflictStrategy(sha string, strategy string) error {
 	return s.updateTask(sha, func(task *Task) {
 		task.Status = StatusPending
 		task.Error = ""
 		task.Attempts++
+		task.CherryPickConflictStrategy = strategy
 	})
 }
 

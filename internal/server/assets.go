@@ -554,6 +554,14 @@ const indexHTML = `<!doctype html>
       gap: 8px;
     }
 
+    .retry-actions {
+      display: flex;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-width: 210px;
+    }
+
     .retry-action {
       min-height: 30px;
       padding: 0 10px;
@@ -1188,8 +1196,10 @@ const indexHTML = `<!doctype html>
       await refresh();
     }
 
-    async function retry(sha) {
-      await fetch('/api/retry?sha=' + encodeURIComponent(sha), { method: 'POST' });
+    async function retry(sha, conflictStrategy) {
+      let path = '/api/retry?sha=' + encodeURIComponent(sha);
+      if (conflictStrategy) path += '&conflict_strategy=' + encodeURIComponent(conflictStrategy);
+      await fetch(path, { method: 'POST' });
       await refresh();
     }
 
@@ -1371,9 +1381,7 @@ const indexHTML = `<!doctype html>
         return;
       }
       el.innerHTML = pageTasks.map(task => {
-        const retryButton = task.status === 'failed'
-          ? '<button class="retry-action" onclick="retry(' + JSON.stringify(task.sha).replaceAll('"', '&quot;') + ')">重试</button>'
-          : '';
+        const retryButton = retryActionsHTML(task);
         const mr = task.mr_url
           ? '<a href="' + escapeHTML(task.mr_url) + '" target="_blank">MR #' + task.mr_number + '</a>'
           : (task.mr_number ? 'MR #' + escapeHTML(task.mr_number) : 'MR 未创建');
@@ -1393,6 +1401,24 @@ const indexHTML = `<!doctype html>
           '<div class="task-state"><div class="status ' + escapeHTML(task.status || '') + '">' + escapeHTML(task.status || 'pending') + '</div>' + retryButton + '</div>' +
           '</div>';
       }).join('');
+    }
+
+    function retryActionsHTML(task) {
+      if (task.status !== 'failed') return '';
+      const shaArg = JSON.stringify(task.sha).replaceAll('"', '&quot;');
+      const actions = [
+        '<button class="retry-action" onclick="retry(' + shaArg + ')">重试</button>'
+      ];
+      if (isCherryPickConflict(task.error || '')) {
+        actions.push('<button class="retry-action" title="使用待提交 commit 的冲突文件内容重试" onclick="retry(' + shaArg + ', &quot;theirs&quot;)">用提交内容重试</button>');
+        actions.push('<button class="retry-action" title="保留目标分支已有的冲突文件内容重试" onclick="retry(' + shaArg + ', &quot;ours&quot;)">保留目标分支重试</button>');
+      }
+      return '<div class="retry-actions">' + actions.join('') + '</div>';
+    }
+
+    function isCherryPickConflict(error) {
+      const text = String(error || '').toLowerCase();
+      return text.includes('cherry-pick') && (text.includes('conflict') || text.includes('merge conflict'));
     }
 
     function clampPage(page) {

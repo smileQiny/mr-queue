@@ -507,3 +507,13 @@ Before pushing an MR branch, `mr-queue` checks whether the exact commit patch is
 already present on the target base branch. If it is already present, or if Git
 reports an empty cherry-pick, the task is marked `skipped` and automatic runs
 continue to the next commit without waiting for the next-PR delay.
+
+If a task fails because `git cherry-pick` reports a merge conflict, the web queue
+keeps the task failed until you choose how to retry that commit:
+
+- `重试`: run the same cherry-pick again without a conflict strategy.
+- `用提交内容重试`: resolve conflicted files with the queued commit content.
+- `保留目标分支重试`: resolve conflicted files with the target branch content.
+
+The last two choices only apply to that failed commit. They do not change the
+global workflow or other queued commits.

@@ -22,6 +22,7 @@ type fakeGitOps struct {
 	commits        []Commit
 	alreadyApplied map[string]bool
 	pushErr        error
+	pushOptions    []PushOptions
 }
 
 func (g *fakeGitOps) RefreshRefs(remotes []string) error {
@@ -40,8 +41,9 @@ func (g *fakeGitOps) ListCommits(commitRange string) ([]Commit, error) {
 	}}, nil
 }
 
-func (g *fakeGitOps) PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string) (string, error) {
+func (g *fakeGitOps) PushSingleCommitBranch(commit Commit, branchName string, baseRef string, remote string, options PushOptions) (string, error) {
 	g.pushed = append(g.pushed, commit.SHA+":"+branchName+":"+baseRef+":"+remote)
+	g.pushOptions = append(g.pushOptions, options)
 	if g.pushErr != nil {
 		return "", g.pushErr
 	}
@@ -1344,6 +1346,58 @@ func TestRunOnceSkipsEmptyCherryPickWithoutCreatingMR(t *testing.T) {
 	}
 }
 
+func TestRunOnceUsesTaskConflictStrategyOnRetry(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitter := &fakeClient{}
+	reviewer := &fakeClient{}
+	maintainer := &fakeClient{}
+	gitOps := &fakeGitOps{}
+	cfg := config.Config{
+		Queue: config.Queue{
+			Remote:  "private",
+			BaseRef: "private/master-test",
+		},
+		Private: config.Private{
+			Remote:       "private",
+			BranchPrefix: "mr-queue",
+		},
+		Community: config.Community{
+			Remote: "private",
+			Owner:  "smileQiny",
+			Repo:   "syskits",
+			Branch: "master-test",
+		},
+		Workflow: config.Workflow{
+			CommitRange: "47824259^..1660a7c4",
+			MergeMethod: "external",
+		},
+	}
+	if err := store.ReplaceQueueTasksForConfig(cfg, []state.QueueTask{{SHA: "abcdef123456", Subject: "Add feature"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTaskStatus("abcdef123456", state.StatusFailed, "conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetryTaskWithConflictStrategy("abcdef123456", "theirs"); err != nil {
+		t.Fatal(err)
+	}
+	r := New(cfg, store, gitOps, submitter, reviewer, maintainer)
+
+	if err := r.RunOnce(); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if len(gitOps.pushOptions) != 1 {
+		t.Fatalf("push options = %#v", gitOps.pushOptions)
+	}
+	if gitOps.pushOptions[0].ConflictStrategy != "theirs" {
+		t.Fatalf("conflict strategy = %q", gitOps.pushOptions[0].ConflictStrategy)
+	}
+}
+
 func TestRunOnceSkipsAlreadyAppliedCommitBeforePushing(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -1832,7 +1886,7 @@ func TestLocalGitOpsPushSingleCommitBranchCreatesBranchWithOnlyOneCommitOverBase
 	runGit(t, dir, "commit", "-m", "two")
 	second := gitOutput(t, dir, "rev-parse", "HEAD")
 
-	mrCommitSHA, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(Commit{SHA: second}, "mr-queue-second", base, "origin")
+	mrCommitSHA, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(Commit{SHA: second}, "mr-queue-second", base, "origin", PushOptions{})
 	if err != nil {
 		t.Fatalf("PushSingleCommitBranch returned error: %v", err)
 	}
@@ -1851,6 +1905,114 @@ func TestLocalGitOpsPushSingleCommitBranchCreatesBranchWithOnlyOneCommitOverBase
 	}
 	if strings.TrimSpace(first) == strings.TrimSpace(branchTip) {
 		t.Fatalf("branch unexpectedly points at first commit")
+	}
+}
+
+func TestLocalGitOpsPushSingleCommitBranchUsesIncomingContentOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, remote, "init", "--bare")
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(t, dir, "remote", "add", "origin", remote)
+
+	writeRepoFile(t, dir, "base.txt", "base\n")
+	runGit(t, dir, "add", "base.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	base := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "target", base)
+	writeRepoFile(t, dir, "README.md", "target readme\n")
+	runGit(t, dir, "add", "README.md")
+	runGit(t, dir, "commit", "-m", "target readme")
+	target := gitOutput(t, dir, "rev-parse", "HEAD")
+	runGit(t, dir, "push", "origin", "target")
+
+	runGit(t, dir, "checkout", "-B", "queue", base)
+	writeRepoFile(t, dir, "README.md", "queue readme\n")
+	writeRepoFile(t, dir, "feature.txt", "feature\n")
+	runGit(t, dir, "add", "README.md", "feature.txt")
+	runGit(t, dir, "commit", "-m", "queue readme")
+	queueCommit := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	_, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(
+		Commit{SHA: queueCommit},
+		"mr-conflict-theirs",
+		target,
+		"origin",
+		PushOptions{ConflictStrategy: "theirs"},
+	)
+	if err != nil {
+		t.Fatalf("PushSingleCommitBranch returned error: %v", err)
+	}
+
+	branchTip := gitOutput(t, dir, "rev-parse", "origin/mr-conflict-theirs")
+	readme := gitOutput(t, dir, "show", branchTip+":README.md")
+	if readme != "queue readme" {
+		t.Fatalf("README.md = %q", readme)
+	}
+	feature := gitOutput(t, dir, "show", branchTip+":feature.txt")
+	if feature != "feature" {
+		t.Fatalf("feature.txt = %q", feature)
+	}
+}
+
+func TestLocalGitOpsPushSingleCommitBranchKeepsTargetContentOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, remote, "init", "--bare")
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(t, dir, "remote", "add", "origin", remote)
+
+	writeRepoFile(t, dir, "base.txt", "base\n")
+	runGit(t, dir, "add", "base.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	base := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	runGit(t, dir, "checkout", "-B", "target", base)
+	writeRepoFile(t, dir, "README.md", "target readme\n")
+	runGit(t, dir, "add", "README.md")
+	runGit(t, dir, "commit", "-m", "target readme")
+	target := gitOutput(t, dir, "rev-parse", "HEAD")
+	runGit(t, dir, "push", "origin", "target")
+
+	runGit(t, dir, "checkout", "-B", "queue", base)
+	writeRepoFile(t, dir, "README.md", "queue readme\n")
+	writeRepoFile(t, dir, "feature.txt", "feature\n")
+	runGit(t, dir, "add", "README.md", "feature.txt")
+	runGit(t, dir, "commit", "-m", "queue readme")
+	queueCommit := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	_, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(
+		Commit{SHA: queueCommit},
+		"mr-conflict-ours",
+		target,
+		"origin",
+		PushOptions{ConflictStrategy: "ours"},
+	)
+	if err != nil {
+		t.Fatalf("PushSingleCommitBranch returned error: %v", err)
+	}
+
+	branchTip := gitOutput(t, dir, "rev-parse", "origin/mr-conflict-ours")
+	readme := gitOutput(t, dir, "show", branchTip+":README.md")
+	if readme != "target readme" {
+		t.Fatalf("README.md = %q", readme)
+	}
+	feature := gitOutput(t, dir, "show", branchTip+":feature.txt")
+	if feature != "feature" {
+		t.Fatalf("feature.txt = %q", feature)
 	}
 }
 
@@ -1874,7 +2036,7 @@ func TestLocalGitOpsPushSingleCommitBranchReturnsEmptyCherryPick(t *testing.T) {
 	runGit(t, dir, "branch", "base")
 	runGit(t, dir, "push", "origin", "base")
 
-	_, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(Commit{SHA: featureSHA}, "mr-empty", "base", "origin")
+	_, err := LocalGitOps{Dir: dir}.PushSingleCommitBranch(Commit{SHA: featureSHA}, "mr-empty", "base", "origin", PushOptions{})
 	if !errors.Is(err, ErrEmptyCherryPick) {
 		t.Fatalf("err = %v", err)
 	}

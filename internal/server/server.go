@@ -429,7 +429,14 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sha is required", http.StatusBadRequest)
 		return
 	}
-	if err := s.runtime.State.RetryTask(sha); err != nil {
+	strategy := r.URL.Query().Get("conflict_strategy")
+	switch strategy {
+	case "", "theirs", "ours":
+	default:
+		http.Error(w, "conflict_strategy must be theirs or ours", http.StatusBadRequest)
+		return
+	}
+	if err := s.runtime.State.RetryTaskWithConflictStrategy(sha, strategy); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
