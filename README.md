@@ -19,6 +19,103 @@ processes one commit at a time:
 Tokens are read from `.env` through names configured in `mr-queue.yml`. Real token
 values are not stored in YAML, logs, or the state file.
 
+## Configuration Relationship
+
+Simple Mode keeps the user-facing config small: name the local workspace, the
+source repository, the target repository, MR branch naming, and token
+environment variable names. `mr-queue` derives the local Git remotes from those
+repository full paths and pushes generated MR branches back to `source.repo`.
+
+```mermaid
+flowchart LR
+  subgraph Config["mr-queue.yml"]
+    Workspace["workspace<br/>local Git checkout"]
+    Source["source.repo<br/>source.branch or source.range"]
+    Target["target.repo<br/>target.branch"]
+    MRBranch["mr.branch_prefix<br/>mr.branch_template"]
+    Auth["auth.*.token_env<br/>names only"]
+  end
+
+  subgraph Local["Local machine"]
+    Repo["workspace Git repository"]
+    SourceRemote["managed source remote<br/>mrq-...source..."]
+    TargetRemote["managed target remote<br/>mrq-...target..."]
+    State[".mr-queue/state.json"]
+  end
+
+  subgraph Provider["GitCode"]
+    SourceRepo["source.repo<br/>queue commits and MR branches"]
+    TargetRepo["target.repo<br/>target branch"]
+    PullRequest["Merge Request<br/>source branch -> target branch"]
+  end
+
+  subgraph Env[".env or shell environment"]
+    Submitter["submitter token<br/>create MR and push source branch"]
+    Reviewer["reviewer token<br/>comment or approve MR"]
+    Maintainer["maintainer token<br/>merge unless external mode"]
+  end
+
+  Workspace --> Repo
+  Source --> SourceRemote
+  Target --> TargetRemote
+  MRBranch --> SourceRepo
+  Auth --> Submitter
+  Auth --> Reviewer
+  Auth --> Maintainer
+  Repo --> SourceRemote --> SourceRepo
+  Repo --> TargetRemote --> TargetRepo
+  SourceRepo --> PullRequest
+  PullRequest --> TargetRepo
+  Submitter --> SourceRepo
+  Submitter --> PullRequest
+  Reviewer --> PullRequest
+  Maintainer --> PullRequest
+  Repo --> State
+```
+
+Key relationships:
+
+- `workspace` is a normal local Git checkout. You do not need to `cd` or
+  `pushd` into a source remote.
+- `source.repo` is both the queue source and the MR branch push destination.
+- `target.repo` is where MRs are opened and eventually merged.
+- local remotes are implementation details managed by `mr-queue`; users
+  configure repository full paths instead of remote names.
+- `.env` stores token values, while `mr-queue.yml` stores only token variable
+  names.
+
+## Operation Flow
+
+Run `doctor --fix` before using the queue. It prepares managed remotes, checks
+fetch access, verifies the resolved commit range, and performs a dry-run push to
+confirm the submitter account can push MR branches to `source.repo`.
+
+```mermaid
+flowchart TD
+  A["Edit mr-queue.yml<br/>and .env"] --> B["Run doctor --fix"]
+  B --> C{"All checks pass?"}
+  C -- "No" --> D["Fix workspace, repo paths,<br/>tokens, or Git push permission"]
+  D --> B
+  C -- "Yes" --> E["serve, sync-queue,<br/>or run"]
+
+  E --> F["Fetch source and target refs"]
+  F --> G["Resolve commit range<br/>source.range or target..source"]
+  G --> H["Load queue into state"]
+  H --> I{"Run next commit?"}
+  I -- "No" --> J["Preview queue in web panel"]
+  I -- "Yes" --> K["Create temporary worktree<br/>at target branch"]
+  K --> L["Cherry-pick exactly one<br/>source commit"]
+  L --> M["Push MR branch<br/>to source.repo"]
+  M --> N["Create MR<br/>source.repo branch -> target.repo branch"]
+  N --> O["Reviewer comment<br/>and optional approval"]
+  O --> P{"merge_method"}
+  P -- "external" --> Q["Wait for bot or platform<br/>to merge the MR"]
+  P -- "api merge" --> R["Maintainer token<br/>merges the MR"]
+  Q --> S["Mark commit merged<br/>then continue next commit"]
+  R --> S
+  S --> I
+```
+
 ## Quick Start
 
 ```bash
