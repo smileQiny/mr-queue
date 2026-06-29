@@ -87,6 +87,11 @@ func (c *Client) GetPull(owner string, repo string, number int) (PullRequest, er
 	return out, err
 }
 
+func (c *Client) CheckRepository(owner string, repo string, _ string) error {
+	var out map[string]interface{}
+	return c.request(http.MethodGet, fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(repo)), nil, &out)
+}
+
 func (c *Client) CommentPull(owner string, repo string, number int, body string) (Comment, error) {
 	var out Comment
 	payload := map[string]string{"body": body}

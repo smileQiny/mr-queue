@@ -10,22 +10,35 @@ import (
 	"time"
 
 	"mr-queue/internal/app"
+	"mr-queue/internal/config"
+	"mr-queue/internal/doctor"
+	"mr-queue/internal/gitcode"
 	"mr-queue/internal/runner"
 )
 
+type DoctorRunner interface {
+	Run(fix bool) doctor.Report
+}
+
 type Server struct {
-	runtime *app.Runtime
-	mu      sync.Mutex
-	running bool
-	mode    string
-	lastErr string
-	lastMsg string
-	cancel  context.CancelFunc
+	runtime      *app.Runtime
+	doctorRunner DoctorRunner
+	doctorReport *doctor.Report
+	mu           sync.Mutex
+	running      bool
+	mode         string
+	lastErr      string
+	lastMsg      string
+	cancel       context.CancelFunc
 }
 
 func New(runtime *app.Runtime) *Server {
-	s := &Server{runtime: runtime}
+	s := &Server{
+		runtime:      runtime,
+		doctorRunner: runtimeDoctorRunner{runtime: runtime},
+	}
 	go s.refreshWaitingLoop()
+	go s.runStartupDoctor()
 	return s
 }
 
@@ -40,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pause", s.pause)
 	mux.HandleFunc("/api/resume", s.resume)
 	mux.HandleFunc("/api/retry", s.retry)
+	mux.HandleFunc("/api/doctor", s.doctor)
 	return mux
 }
 
@@ -58,6 +72,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	mode := s.mode
 	lastErr := s.lastErr
 	lastMsg := s.lastMsg
+	doctorReport := s.doctorReport
 	s.mu.Unlock()
 	respondJSON(w, map[string]interface{}{
 		"state":   s.runtime.State.Snapshot(),
@@ -66,7 +81,56 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"mode":    mode,
 		"lastErr": lastErr,
 		"lastMsg": lastMsg,
+		"doctor":  doctorReport,
 	})
+}
+
+func (s *Server) runStartupDoctor() {
+	if s.doctorRunner == nil {
+		return
+	}
+	report := s.doctorRunner.Run(false)
+	s.mu.Lock()
+	s.doctorReport = &report
+	s.mu.Unlock()
+}
+
+func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	fix := r.URL.Query().Get("fix") == "true" || r.URL.Query().Get("fix") == "1"
+	runner := s.doctorRunner
+	if runner == nil {
+		runner = runtimeDoctorRunner{runtime: s.runtime}
+	}
+	report := runner.Run(fix)
+	s.mu.Lock()
+	s.doctorReport = &report
+	s.mu.Unlock()
+	respondJSON(w, report)
+}
+
+type runtimeDoctorRunner struct {
+	runtime *app.Runtime
+}
+
+func (r runtimeDoctorRunner) Run(fix bool) doctor.Report {
+	cfg := *r.runtime.Config
+	return doctor.Run(
+		cfg,
+		doctor.Options{Fix: fix},
+		doctor.LocalGitChecker{Dir: cfg.Local.Path, Username: cfg.Private.HeadNamespace, AccessToken: cfg.Auth.Submitter.Token},
+		gitcode.NewClient(reviewerTokenForDoctor(cfg)),
+	)
+}
+
+func reviewerTokenForDoctor(cfg config.Config) string {
+	if cfg.Auth.Reviewer.Token != "" {
+		return cfg.Auth.Reviewer.Token
+	}
+	return cfg.Auth.Maintainer.Token
 }
 
 func (s *Server) syncQueue(w http.ResponseWriter, r *http.Request) {

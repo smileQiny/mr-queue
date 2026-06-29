@@ -315,6 +315,35 @@ const indexHTML = `<!doctype html>
     .log-step { font-weight: 700; margin-right: 6px; }
     .log-time { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
+    .doctor-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .doctor-list {
+      padding: 10px 18px 18px;
+    }
+
+    .doctor-check {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 8px;
+      padding: 9px 0;
+      border-bottom: 1px solid #eef1f6;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .doctor-check:last-child { border-bottom: 0; }
+    .doctor-mark { font-weight: 800; text-align: center; }
+    .doctor-check.ok .doctor-mark { color: var(--good); }
+    .doctor-check.warn .doctor-mark { color: var(--warn); }
+    .doctor-check.error .doctor-mark { color: var(--bad); }
+    .doctor-name { font-weight: 700; }
+    .doctor-fix { color: var(--muted); margin-top: 3px; }
+
     .empty {
       padding: 34px 18px;
       text-align: center;
@@ -392,6 +421,16 @@ const indexHTML = `<!doctype html>
         <div class="kv" id="config"></div>
       </section>
       <section>
+        <div class="section-head">
+          <h2>运行检查</h2>
+          <div class="doctor-actions">
+            <button id="doctorBtn" onclick="runDoctor(false)">检查</button>
+            <button id="doctorFixBtn" onclick="runDoctor(true)">修复并检查</button>
+          </div>
+        </div>
+        <div class="doctor-list" id="doctor"></div>
+      </section>
+      <section>
         <div class="section-head"><h2>最新日志</h2><span class="count" id="running">idle</span></div>
         <div class="logs" id="logs"></div>
       </section>
@@ -429,6 +468,15 @@ const indexHTML = `<!doctype html>
       await refresh();
     }
 
+    async function runDoctor(fix) {
+      document.getElementById('doctorBtn').disabled = true;
+      document.getElementById('doctorFixBtn').disabled = true;
+      const res = await fetch('/api/doctor' + (fix ? '?fix=true' : ''), { method: 'POST' });
+      const report = await res.json();
+      renderDoctor(report);
+      await refresh();
+    }
+
     async function refresh() {
       const res = await fetch('/api/status');
       const data = await res.json();
@@ -440,6 +488,8 @@ const indexHTML = `<!doctype html>
       document.getElementById('runBtn').disabled = data.running || data.state.paused;
       document.getElementById('loopBtn').disabled = data.running || data.state.paused;
       document.getElementById('stopBtn').disabled = !data.running;
+      document.getElementById('doctorBtn').disabled = data.running;
+      document.getElementById('doctorFixBtn').disabled = data.running;
       for (const id of ['waitCheckDelayMin', 'waitCheckDelayMax', 'nextPRDelayMin', 'nextPRDelayMax', 'workStart', 'workEnd', 'maxMerged']) {
         document.getElementById(id).disabled = data.running;
       }
@@ -449,6 +499,7 @@ const indexHTML = `<!doctype html>
       applyLoopDefaults(data.config || {});
       renderQueue(tasks);
       renderConfig(data.config || {});
+      renderDoctor(data.doctor);
       renderLogs(tasks, data.lastErr, data.lastMsg);
     }
 
@@ -551,6 +602,27 @@ const indexHTML = `<!doctype html>
       document.getElementById('config').innerHTML = rows.map(([k, v]) =>
         '<div class="kv-row"><div class="key">' + escapeHTML(k) + '</div><div class="value">' + escapeHTML(v || '-') + '</div></div>'
       ).join('');
+    }
+
+    function renderDoctor(report) {
+      const el = document.getElementById('doctor');
+      if (!report || !Array.isArray(report.checks)) {
+        el.innerHTML = '<div class="empty">服务启动后会自动检查一次，也可以手动运行检查。</div>';
+        return;
+      }
+      if (!report.checks.length) {
+        el.innerHTML = '<div class="empty">暂无检查结果。</div>';
+        return;
+      }
+      el.innerHTML = report.checks.map(check => {
+        const status = String(check.status || '');
+        const mark = status === 'ok' ? '✓' : (status === 'warn' ? '!' : '✗');
+        return '<div class="doctor-check ' + escapeHTML(status) + '">' +
+          '<div class="doctor-mark">' + mark + '</div>' +
+          '<div><div><span class="doctor-name">' + escapeHTML(check.name || '-') + '</span> ' + escapeHTML(check.message || '') + '</div>' +
+          (check.fix ? '<div class="doctor-fix">fix: ' + escapeHTML(check.fix) + '</div>' : '') +
+          '</div></div>';
+      }).join('');
     }
 
     function renderLogs(tasks, lastErr, lastMsg) {

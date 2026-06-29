@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"mr-queue/internal/app"
 	"mr-queue/internal/config"
+	"mr-queue/internal/doctor"
 	"mr-queue/internal/state"
 )
 
@@ -65,4 +67,67 @@ func TestStatusIncludesLastMessage(t *testing.T) {
 	if body["lastMsg"] != "auto run stopped: reached max merged commits: 3/3" {
 		t.Fatalf("lastMsg = %#v", body["lastMsg"])
 	}
+}
+
+func TestStatusIncludesStartupDoctorReport(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := doctor.Report{OK: true, Checks: []doctor.Check{{Name: "config", Status: doctor.StatusOK, Message: "loaded"}}}
+	s := &Server{
+		runtime:      &app.Runtime{Config: &config.Config{}, State: store},
+		doctorReport: &report,
+	}
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+
+	s.status(w, req)
+
+	var body struct {
+		Doctor *doctor.Report `json:"doctor"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if body.Doctor == nil || !body.Doctor.OK || body.Doctor.Checks[0].Name != "config" {
+		t.Fatalf("doctor = %#v", body.Doctor)
+	}
+}
+
+func TestDoctorAPIRunsDoctorAndReturnsReport(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		runtime: &app.Runtime{Config: &config.Config{}, State: store},
+		doctorRunner: fakeDoctorRunner{report: doctor.Report{
+			OK:     true,
+			Checks: []doctor.Check{{Name: "workspace", Status: doctor.StatusOK, Message: "ready"}},
+		}},
+	}
+	req := httptest.NewRequest("POST", "/api/doctor", nil)
+	w := httptest.NewRecorder()
+
+	s.doctor(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var report doctor.Report
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode doctor report: %v", err)
+	}
+	if !report.OK || report.Checks[0].Name != "workspace" {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+type fakeDoctorRunner struct {
+	report doctor.Report
+}
+
+func (r fakeDoctorRunner) Run(fix bool) doctor.Report {
+	return r.report
 }

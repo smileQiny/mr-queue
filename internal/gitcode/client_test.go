@@ -137,6 +137,24 @@ func TestGetPullUsesExpectedEndpoint(t *testing.T) {
 	}
 }
 
+func TestCheckRepositoryUsesExpectedEndpoint(t *testing.T) {
+	var seenPath string
+	client := NewClient("token-7")
+	client.BaseURL = "https://example.test/api/v5"
+	client.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		seenPath = req.URL.Path
+		return jsonResponse(http.StatusOK, `{"full_name":"community/project"}`), nil
+	})}
+
+	if err := client.CheckRepository("community", "project", "ignored-token"); err != nil {
+		t.Fatalf("CheckRepository returned error: %v", err)
+	}
+
+	if seenPath != "/api/v5/repos/community/project" {
+		t.Fatalf("path = %q", seenPath)
+	}
+}
+
 func TestCommentPullAcceptsStringID(t *testing.T) {
 	client := NewClient("token-3")
 	client.BaseURL = "https://example.test/api/v5"

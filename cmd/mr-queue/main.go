@@ -9,6 +9,8 @@ import (
 
 	"mr-queue/internal/app"
 	"mr-queue/internal/config"
+	"mr-queue/internal/doctor"
+	"mr-queue/internal/gitcode"
 	"mr-queue/internal/server"
 )
 
@@ -34,6 +36,8 @@ func main() {
 		run(os.Args[2:])
 	case "dry-run":
 		dryRun(os.Args[2:])
+	case "doctor":
+		doctorCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -107,6 +111,52 @@ func dryRun(args []string) {
 	fmt.Println(cfg.Safe())
 }
 
+func doctorCmd(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	configPath := fs.String("config", "mr-queue.yml", "path to YAML config")
+	envPath := fs.String("env", "", "path to .env file")
+	fix := fs.Bool("fix", false, "add or update managed git remotes before checking connectivity")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*configPath, *envPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	report := doctor.Run(
+		cfg,
+		doctor.Options{Fix: *fix},
+		doctor.LocalGitChecker{Dir: cfg.Local.Path, Username: cfg.Private.HeadNamespace, AccessToken: cfg.Auth.Submitter.Token},
+		gitcode.NewClient(reviewerTokenFor(cfg)),
+	)
+	printDoctorReport(report)
+	if !report.OK {
+		os.Exit(1)
+	}
+}
+
+func reviewerTokenFor(cfg config.Config) string {
+	if cfg.Auth.Reviewer.Token != "" {
+		return cfg.Auth.Reviewer.Token
+	}
+	return cfg.Auth.Maintainer.Token
+}
+
+func printDoctorReport(report doctor.Report) {
+	for _, check := range report.Checks {
+		prefix := "✓"
+		if check.Status == doctor.StatusWarn {
+			prefix = "!"
+		}
+		if check.Status == doctor.StatusError {
+			prefix = "✗"
+		}
+		fmt.Printf("%s %s: %s\n", prefix, check.Name, check.Message)
+		if check.Fix != "" {
+			fmt.Printf("  fix: %s\n", check.Fix)
+		}
+	}
+}
+
 func printVersion() {
 	fmt.Printf("mr-queue %s\ncommit: %s\nbuilt: %s\n", version, commit, buildDate)
 }
@@ -118,4 +168,5 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mr-queue sync-queue --config mr-queue.yml [--env .env] [--skip-fetch]")
 	fmt.Fprintln(os.Stderr, "  mr-queue run --config mr-queue.yml [--env .env]")
 	fmt.Fprintln(os.Stderr, "  mr-queue dry-run --config mr-queue.yml [--env .env]")
+	fmt.Fprintln(os.Stderr, "  mr-queue doctor --config mr-queue.yml [--env .env] [--fix]")
 }
