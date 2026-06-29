@@ -118,35 +118,114 @@ flowchart TD
 
 ## Quick Start
 
+Start from a local Git checkout of the project you want to use as the working
+repository. This checkout is `workspace`; it can already have any remotes you
+use for normal development, and `mr-queue` will add its own managed remotes when
+`doctor --fix` runs.
+
+1. Copy the example files:
+
 ```bash
 cp mr-queue.yml.example mr-queue.yml
 cp .env.example .env
 ```
 
-Edit `mr-queue.yml` for repositories, branches, and workflow settings. In the
-default simple mode you provide repository full paths and branches; `mr-queue`
-creates or updates the local Git remotes it needs. Edit `.env` with fresh
-provider tokens.
+2. Fill in the Simple Mode repository settings in `mr-queue.yml`:
 
-Start the local web panel:
+```yaml
+provider: gitcode
+workspace: "/path/to/local/repo"
+
+source:
+  repo: "gitcode.com/your_namespace/project"
+  branch: "queue"
+
+target:
+  repo: "gitcode.com/community/project"
+  branch: "master"
+```
+
+`source.repo` is where queue commits are read from and where generated MR
+branches are pushed. `target.repo` is where MRs are created. Use repository full
+paths including the host, for example `gitcode.com/owner/repo`.
+
+If you want a fixed commit range instead of `target..source`, configure one of
+these under `source`:
+
+```yaml
+source:
+  range: "a3c47d5f^..e34a0a61"
+  # or:
+  # start_sha: "a3c47d5f"
+  # end_sha: "e34a0a61"
+```
+
+3. Fill in `.env` with token values:
+
+```bash
+GITCODE_SUBMITTER_TOKEN=replace-with-submit-token
+GITCODE_REVIEWER_TOKEN=replace-with-review-token
+GITCODE_MAINTAINER_TOKEN=replace-with-merge-token
+```
+
+For `workflow.merge_method: "external"`, the maintainer token is not required.
+The submitter token must be able to create MRs and push branches to
+`source.repo`; the reviewer token must be able to read, comment, or approve MRs
+on `target.repo`.
+
+4. Check and prepare the environment:
+
+```bash
+go run ./cmd/mr-queue doctor --config mr-queue.yml --fix
+```
+
+`doctor --fix` adds or updates managed local remotes, fetches source and target
+refs, verifies the commit range, checks GitCode API access, and dry-runs a push
+to `source.repo`. It does not create MRs or remote test branches.
+
+5. Start the local web panel:
 
 ```bash
 go run ./cmd/mr-queue serve --config mr-queue.yml
 ```
 
-Open:
+Open the panel:
 
 ```text
 http://127.0.0.1:8787/
 ```
 
-Preload the queue without pushing branches or creating MRs. Syncing replaces the
-visible queue with the current configured `commit_range`, so old range entries do
-not remain mixed into the panel:
+The web panel also has a “运行检查” section. Use it after changing config or
+tokens.
+
+6. Preload the queue without pushing branches or creating MRs:
 
 ```bash
 go run ./cmd/mr-queue sync-queue --config mr-queue.yml
 ```
+
+Syncing replaces the visible queue with the current configured `commit_range`,
+so old range entries do not remain mixed into the panel. In the web panel, this
+is the `同步队列` action.
+
+7. Run the queue one commit at a time:
+
+```bash
+go run ./cmd/mr-queue run --config mr-queue.yml
+```
+
+In the web panel, use `运行下一条` for a single commit or `自动运行` to continue
+through the queue with the configured delay and stop conditions.
+
+Useful debug commands:
+
+```bash
+go run ./cmd/mr-queue dry-run --config mr-queue.yml
+go run ./cmd/mr-queue doctor --config mr-queue.yml
+```
+
+`dry-run` prints the resolved config without exposing token values. Plain
+`doctor` checks the current setup without modifying remotes.
 
 When local refs are already up to date and the environment cannot write to the
 target repository's `.git/FETCH_HEAD`, add `--skip-fetch` for preview-only local
@@ -156,33 +235,7 @@ debugging:
 go run ./cmd/mr-queue sync-queue --config mr-queue.yml --skip-fetch
 ```
 
-Run one commit without the web panel:
-
-```bash
-go run ./cmd/mr-queue run --config mr-queue.yml
-```
-
-Print safe config without exposing token values:
-
-```bash
-go run ./cmd/mr-queue dry-run --config mr-queue.yml
-```
-
-Check whether the local repository, remotes, tokens, fetches, commit range, and
-GitCode API access are ready:
-
-```bash
-go run ./cmd/mr-queue doctor --config mr-queue.yml
-```
-
-Let `doctor` add or update managed local remotes before checking connectivity:
-
-```bash
-go run ./cmd/mr-queue doctor --config mr-queue.yml --fix
-```
-
-The web panel also runs a startup check and includes a “运行检查” section for
-manual checks.
+### What doctor checks
 
 `doctor` checks:
 
