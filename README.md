@@ -3,15 +3,15 @@
 `mr-queue` is a Go CLI with a local web panel for serial merge request queue automation.
 The first provider adapter targets GitCode.
 
-Use a private queue branch as the source of prepared commits. It processes one
-commit at a time:
+Use a source repository branch as the queue of prepared commits. `mr-queue`
+processes one commit at a time:
 
-1. fetch the private queue branch and community target branch
+1. fetch the source queue branch and target branch
 2. read the next unmerged commit from the queue branch
-3. create a temporary worktree at the latest community target branch
+3. create a temporary worktree at the latest target branch
 4. cherry-pick exactly one queue commit onto a per-commit MR branch
-5. push that MR branch to the private repository
-6. create an MR from the private MR branch to the community target branch
+5. push that MR branch to the source repository
+6. create an MR from the source MR branch to the target branch
 7. add the configured review comment and approval with the reviewer account
 8. merge with the maintainer account
 9. move to the next commit only after the current MR is merged
@@ -26,8 +26,10 @@ cp mr-queue.yml.example mr-queue.yml
 cp .env.example .env
 ```
 
-Edit `mr-queue.yml` for repositories, branches, and workflow settings. Edit `.env`
-with fresh provider tokens.
+Edit `mr-queue.yml` for repositories, branches, and workflow settings. In the
+default simple mode you provide repository full paths and branches; `mr-queue`
+creates or updates the local Git remotes it needs. Edit `.env` with fresh
+provider tokens.
 
 Start the local web panel:
 
@@ -69,10 +71,78 @@ Print safe config without exposing token values:
 go run ./cmd/mr-queue dry-run --config mr-queue.yml
 ```
 
+Check whether the local repository, remotes, tokens, fetches, commit range, and
+GitCode API access are ready:
+
+```bash
+go run ./cmd/mr-queue doctor --config mr-queue.yml
+```
+
+Let `doctor` add or update managed local remotes before checking connectivity:
+
+```bash
+go run ./cmd/mr-queue doctor --config mr-queue.yml --fix
+```
+
+The web panel also runs a startup check and includes a “运行检查” section for
+manual checks.
+
+`doctor` checks:
+
+- config loading and token environment variables
+- whether `workspace` is a Git repository
+- managed source/target remotes, with `--fix` adding or updating them
+- source and target fetch connectivity
+- the resolved commit range
+- GitCode target repository API access
+
+It does not create MRs or push test branches.
+
+## Simple Mode
+
+The recommended config names the source and target repositories directly:
+
+```yaml
+provider: gitcode
+workspace: "/Users/qiny/codespace/syskits"
+
+source:
+  repo: "gitcode.com/smileQiny/syskits"
+  branch: "new-features"
+
+target:
+  repo: "gitcode.com/openeuler/syskits"
+  branch: "master"
+
+mr:
+  branch_prefix: "feat"
+  branch_template: "{prefix}-{title_or_sha12}"
+```
+
+This means:
+
+- read queue commits from `source.repo/source.branch`
+- push generated MR branches back to `source.repo`
+- create MRs into `target.repo/target.branch`
+- automatically add or update managed remotes such as
+  `mrq-gitcode-com-smileqiny-syskits`
+
+If `source.range` is set, it is used as the exact commit range. Otherwise, if
+`source.start_sha` and `source.end_sha` are set, the range is
+`start_sha^..end_sha`. If no range is configured, `mr-queue` uses
+`target branch..source branch` after fetching both repositories.
+
 ## MR Branch Names
 
-MR branch names are configurable under `private`. The default template keeps the
-old behavior:
+In simple mode, MR branch names are configurable under `mr`:
+
+```yaml
+mr:
+  branch_prefix: "mr-queue"
+  branch_template: "{prefix}-{sha12}"
+```
+
+Advanced configs may still use the legacy `private` block:
 
 ```yaml
 private:
@@ -83,7 +153,7 @@ private:
 For more readable per-commit branches, include the commit title:
 
 ```yaml
-private:
+mr:
   branch_prefix: "feat"
   branch_template: "{prefix}-{title_or_sha12}"
 ```
